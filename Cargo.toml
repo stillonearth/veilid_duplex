@@ -1,0 +1,20 @@
+[package]
+name = "bevy_veilid"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0.72"
+base64 = "0.21.3"
+clap = { version = "4.3.21", features = ["derive"] }
+flume = "0.11.0"
+futures-util = "0.3.28"
+serde = { version = "1.0.188", features= ["derive"] }
+serde_json = "1.0.107"
+tempfile = "3.8.0"
+tokio = { version = "1.30.0", features = ["macros", "rt-multi-thread"] }
+tracing = "0.1.37"
+tracing-subscriber = { version = "0.3.17", features = [ "env-filter" ] }
+veilid-core = { git = "https://gitlab.com/veilid/veilid", tag="v0.2.3", features = [ "rt-tokio" ] }
