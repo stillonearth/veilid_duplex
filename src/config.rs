@@ -3,7 +3,7 @@ use veilid_core::{
     VeilidAPIError,
 };
 
-use crate::CRYPTO_KIND;
+use crate::veilid::CRYPTO_KIND;
 
 pub fn config_callback(
     veilid_storage_dir: std::path::PathBuf,
@@ -12,8 +12,8 @@ pub fn config_callback(
 ) -> ConfigCallbackReturn {
     match key.as_str() {
         "program_name" => Ok(Box::new(String::from("towel"))),
-        "namespace" => Ok(Box::new(String::from(""))),
-        "capabilities.disable" => Ok(Box::new(Vec::<FourCC>::new())),
+        "namespace" => Ok(Box::<String>::default()),
+        "capabilities.disable" => Ok(Box::<Vec<FourCC>>::default()),
         "table_store.directory" => Ok(Box::new(
             veilid_storage_dir
                 .join("table")
