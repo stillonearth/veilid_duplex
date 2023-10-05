@@ -12,8 +12,8 @@ use veilid_core::*;
 use bevy_veilid::{
     config::config_callback,
     veilid::{
-        connect_to_service, create_api_and_connect, create_service_route_pin, network_loop,
-        AppMessage, CRYPTO_KIND,
+        connect_to_service, create_api_and_connect, create_service_route_pin, AppMessage, P2PApp,
+        CRYPTO_KIND,
     },
 };
 
@@ -37,11 +37,9 @@ async fn on_app_message(
 ) -> Result<(), Error> {
     info!("on_app_message::Received message: {:?}\t", app_message.data);
 
-    app_message.swap_routes();
-
     let route = api.import_remote_private_route(app_message.their_route.clone())?;
     let target = veilid_core::Target::PrivateRoute(route.clone());
-
+    app_message.swap_routes();
     app_message.data.count += 1;
 
     info!(
@@ -54,11 +52,11 @@ async fn on_app_message(
     let app_message = serde_json::to_vec(&app_message).unwrap();
 
     let result = rc
-        .app_message(target.clone(), app_message.to_vec())
+        .app_call(target.clone(), app_message.to_vec())
         .await
         .context("app_message");
 
-    result
+    Ok(())
 }
 
 async fn on_app_call(
@@ -89,6 +87,35 @@ async fn on_app_call(
     info!("sending response, done");
 
     result
+}
+
+async fn start_pingpong(
+    target: Target,
+    rc: RoutingContext,
+    our_route: Vec<u8>,
+    their_route: Vec<u8>,
+) -> Result<(), Error> {
+    let mut message = AppMessage {
+        data: ChatMessage { count: 0 },
+        our_route: our_route.clone(),
+        their_route: their_route.clone(),
+    };
+    message.swap_routes();
+    let message = serde_json::to_vec(&message).unwrap();
+
+    info!("Initiaing message exchange, target: {:?}", target.clone());
+
+    let response = rc
+        .app_call(target.clone(), message)
+        .await
+        .context("app_call")?;
+
+    info!(
+        "Received response: {}",
+        String::from_utf8(response).unwrap()
+    );
+
+    Ok(())
 }
 
 #[tokio::main]
@@ -135,12 +162,14 @@ async fn main() -> Result<(), Error> {
     let api = create_api_and_connect(update_callback, config_callback).await?;
 
     // Set up routing with privacy and encryption
-    let rc = api.routing_context();
-    // .with_privacy()?
-    // .with_sequencing(Sequencing::EnsureOrdered);
+    let rc = api
+        .routing_context()
+        .with_privacy()?
+        .with_sequencing(Sequencing::PreferOrdered);
 
     let their_route: Vec<u8>;
-    let mut our_route: Vec<u8>;
+    let our_route: Vec<u8>;
+    let target: Target;
 
     if args.server {
         info!("Creating a private route");
@@ -148,61 +177,36 @@ async fn main() -> Result<(), Error> {
             .new_custom_private_route(
                 &[CRYPTO_KIND],
                 veilid_core::Stability::Reliable,
-                veilid_core::Sequencing::EnsureOrdered,
+                veilid_core::Sequencing::PreferOrdered,
             )
             .await
             .context("new_custom_private_route")?;
 
         info!("Creating a private route, done");
 
-        our_route = general_purpose::STANDARD_NO_PAD
-            .encode(blob)
+        let service_key = general_purpose::STANDARD_NO_PAD
+            .encode(blob.clone())
             .as_bytes()
             .to_vec();
+        our_route = blob.clone();
 
-        create_service_route_pin(rc.clone(), key_pair.key, our_route.clone()).await?;
+        create_service_route_pin(rc.clone(), key_pair.key, service_key.clone()).await?;
     } else if let Some(service_dht_str) = args.client {
         let service_dht_key = CryptoTyped::<CryptoKey>::from_str(&service_dht_str)?;
 
-        let target: Target;
         (target, our_route, their_route) =
             connect_to_service(api.clone(), rc.clone(), service_dht_key).await?;
 
-        info!("their route: {:?}", their_route);
-
-        let mut message = AppMessage {
-            data: ChatMessage { count: 0 },
-            our_route: our_route.clone(),
-            their_route: their_route.clone(),
-        };
-        message.swap_routes();
-        let message = serde_json::to_vec(&message).unwrap();
-
-        info!("Initiaing message exchange, targer: {:?}", target.clone());
-
-        let response = rc
-            .app_call(target.clone(), message)
-            .await
-            .context("app_call")?;
-
-        info!(
-            "Received response: {}",
-            String::from_utf8(response).unwrap()
-        );
+        start_pingpong(target, rc.clone(), our_route.clone(), their_route).await?;
     } else {
         return Ok(());
     }
 
     info!("starting network loop");
-    network_loop(
-        api.clone(),
-        receiver,
-        rc.clone(),
-        on_app_call,
-        on_app_message,
-        our_route.clone(),
-    )
-    .await?;
+
+    let app = P2PApp::new(api.clone(), rc.clone(), our_route.clone(), receiver);
+    app.network_loop(on_app_call, on_app_message, our_route.clone())
+        .await?;
 
     api.shutdown().await;
     return Ok(());

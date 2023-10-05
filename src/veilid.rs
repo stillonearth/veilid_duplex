@@ -135,54 +135,75 @@ pub async fn create_api_and_connect(
     Ok(api)
 }
 
-pub async fn network_loop<F1, Fut1, F2, Fut2, T>(
+pub struct P2PApp {
     api: VeilidAPI,
-    receiver: Receiver<VeilidUpdate>,
     routing_context: RoutingContext,
-    on_app_call: F1,
-    on_app_message: F2,
     our_route: Vec<u8>,
-) -> Result<(), Error>
-where
-    F1: FnOnce(VeilidAPI, RoutingContext, AppMessage<T>) -> Fut1 + Send + Copy + 'static,
-    Fut1: Future<Output = Result<(), Error>> + Send,
-    F2: FnOnce(VeilidAPI, RoutingContext, AppMessage<T>) -> Fut2 + Send + Copy + 'static,
-    Fut2: Future<Output = Result<(), Error>> + Send,
-    T: Serialize + DeserializeOwned + Send + 'static,
-{
-    loop {
-        let res = receiver.recv()?;
+    receiver: Receiver<VeilidUpdate>,
+}
 
-        let routing_context = routing_context.clone();
-        let api = api.clone();
-        let our_route = our_route.clone();
+impl P2PApp {
+    pub fn new(
+        api: VeilidAPI,
+        routing_context: RoutingContext,
+        our_route: Vec<u8>,
+        receiver: Receiver<VeilidUpdate>,
+    ) -> Self {
+        Self {
+            api,
+            routing_context,
+            our_route,
+            receiver,
+        }
+    }
 
-        match res {
-            VeilidUpdate::AppMessage(msg) => {
-                info!("VeilidUpdate::AppMessage");
-                let mut app_message = serde_json::from_slice::<AppMessage<T>>(msg.message())?;
-                app_message.our_route = our_route;
+    pub async fn network_loop<F1, Fut1, F2, Fut2, T>(
+        self,
+        on_app_call: F1,
+        on_app_message: F2,
+        our_route: Vec<u8>,
+    ) -> Result<(), Error>
+    where
+        F1: FnOnce(VeilidAPI, RoutingContext, AppMessage<T>) -> Fut1 + Send + Copy + 'static,
+        Fut1: Future<Output = Result<(), Error>> + Send,
+        F2: FnOnce(VeilidAPI, RoutingContext, AppMessage<T>) -> Fut2 + Send + Copy + 'static,
+        Fut2: Future<Output = Result<(), Error>> + Send,
+        F2: FnOnce(VeilidAPI, RoutingContext, AppMessage<T>) -> Fut2 + Send + Copy + 'static,
+        T: Serialize + DeserializeOwned + Send + 'static,
+    {
+        loop {
+            let res = self.receiver.recv()?;
 
-                spawn(async move {
-                    let _ = on_app_message(api, routing_context, app_message).await;
-                });
-            }
-            VeilidUpdate::AppCall(call) => {
-                info!("VeilidUpdate::AppCall");
-                let mut app_message = serde_json::from_slice::<AppMessage<T>>(call.message())?;
-                app_message.our_route = our_route;
+            let routing_context = self.routing_context.clone();
+            let api = self.api.clone();
+            let our_route = our_route.clone();
 
-                spawn(async move {
-                    let _ = api.app_call_reply(call.id(), b"SERVER ACK".to_vec()).await;
-                    let _ = on_app_call(api, routing_context, app_message).await;
-                });
-            }
-            VeilidUpdate::RouteChange(change) => {
+            match res {
+                VeilidUpdate::AppMessage(msg) => {
+                    info!("VeilidUpdate::AppMessage");
+                    let mut app_message = serde_json::from_slice::<AppMessage<T>>(msg.message())?;
+                    app_message.our_route = our_route;
 
-                // change.
-            }
-            _ => (),
-        };
+                    spawn(async move {
+                        let _ = on_app_message(api, routing_context, app_message).await;
+                    });
+                }
+                VeilidUpdate::AppCall(call) => {
+                    info!("VeilidUpdate::AppCall");
+                    let mut app_message = serde_json::from_slice::<AppMessage<T>>(call.message())?;
+                    app_message.our_route = our_route;
+
+                    spawn(async move {
+                        let _ = api.app_call_reply(call.id(), b"ACK".to_vec()).await;
+                        let _ = on_app_call(api, routing_context, app_message).await;
+                    });
+                }
+                VeilidUpdate::RouteChange(change) => {
+                    info!("change: {:?}", change);
+                }
+                _ => (),
+            };
+        }
     }
 }
 
