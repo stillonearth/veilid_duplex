@@ -1,9 +1,12 @@
 use std::io;
 
-use anyhow::Error;
+use anyhow::{Error, Ok};
 use base64::engine::general_purpose;
 use base64::Engine;
 use flume::Receiver;
+use futures_util::select;
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use tokio::{
     spawn,
     time::{sleep, Duration},
@@ -18,49 +21,46 @@ use veilid_core::{
 
 pub const CRYPTO_KIND: CryptoKind = CRYPTO_KIND_VLD0;
 
-#[derive(Debug, Default)]
-pub struct ServiceKeys {
-    pub key_pair: KeyPair,
-    pub dht_key: Option<CryptoTyped<CryptoKey>>,
-    pub dht_owner_key: Option<PublicKey>,
-    pub dht_owner_secret_key: Option<SecretKey>,
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(bound = "T: Serialize + DeserializeOwned")]
+pub struct AppMessage<T: DeserializeOwned> {
+    pub data: T,
+    pub their_route: Vec<u8>,
+    pub our_route: Vec<u8>,
+}
+
+impl<T: DeserializeOwned> AppMessage<T> {
+    pub fn swap_routes(&mut self) {
+        std::mem::swap(&mut self.their_route, &mut self.our_route);
+    }
 }
 
 pub async fn wait_for_attached(api: &VeilidAPI) -> Result<(), Error> {
     info!("Awaiting attachment");
     loop {
-        if let Ok(state) = api.get_state().await {
-            match state.attachment.state {
-                AttachedWeak | AttachedGood | AttachedStrong | FullyAttached | OverAttached => {
-                    info!("Awaiting attachment, done");
-                    return Ok(());
-                }
-                _ => (),
+        let state = api.get_state().await?;
+        match state.attachment.state {
+            AttachedWeak | AttachedGood | AttachedStrong | FullyAttached | OverAttached => {
+                info!("Awaiting attachment, done");
+                return Ok(());
             }
-
-            sleep(Duration::from_millis(100)).await;
+            _ => (),
         }
+        sleep(Duration::from_millis(100)).await;
     }
 }
 
 pub async fn wait_for_network_start(api: &VeilidAPI) -> Result<(), Error> {
     info!("awaiting network initialization");
     loop {
-        match api.get_state().await {
-            Ok(vs) => {
-                if vs.network.started && !vs.network.peers.is_empty() {
-                    info!(
-                        "Awaiting network initialization, done ({} peer(s))",
-                        vs.network.peers.len()
-                    );
-                    return Ok(());
-                }
-            }
-            Err(e) => {
-                return Err(e.into());
-            }
+        let vs = api.get_state().await?;
+        if vs.network.started && !vs.network.peers.is_empty() {
+            info!(
+                "Awaiting network initialization, done ({} peer(s))",
+                vs.network.peers.len()
+            );
+            return Ok(());
         }
-
         sleep(Duration::from_millis(100)).await;
     }
 }
@@ -68,13 +68,10 @@ pub async fn wait_for_network_start(api: &VeilidAPI) -> Result<(), Error> {
 pub async fn wait_for_public_internet_ready(api: &VeilidAPI) -> Result<(), Error> {
     info!("Awaiting 'public_internet_ready'");
     loop {
-        let state = api.get_state().await;
-        if let Ok(state) = state {
-            if state.attachment.public_internet_ready {
-                break;
-            }
+        let state = api.get_state().await?;
+        if state.attachment.public_internet_ready {
+            break;
         }
-
         sleep(Duration::from_secs(5)).await;
     }
 
@@ -87,9 +84,9 @@ pub async fn create_service_route_pin(
     member_key: PublicKey,
     route: Vec<u8>,
 ) -> Result<(), Error> {
-    let owner_subkey_count = 4;
+    let owner_subkey_count = 1;
 
-    match rc
+    let rec = rc
         .create_dht_record(
             DHTSchema::SMPL(DHTSchemaSMPL {
                 o_cnt: owner_subkey_count,
@@ -100,44 +97,27 @@ pub async fn create_service_route_pin(
             }),
             Some(CRYPTO_KIND),
         )
-        .await
-    {
-        Ok(rec) => {
-            info!("DHT Key: {}", rec.key().clone());
-            match rc.set_dht_value(*rec.key(), 0, route).await {
-                Ok(_) => (),
-                Err(e) => {
-                    return Err(e.into());
-                }
-            }
-            rc.close_dht_record(*rec.key()).await?;
-            Ok(())
-        }
-        Err(e) => Err(e.into()),
-    }
+        .await?;
+
+    info!("DHT Key: {}", rec.key().clone());
+    rc.set_dht_value(*rec.key(), 0, route).await?;
+    rc.close_dht_record(*rec.key()).await?;
+
+    Ok(())
 }
 
 pub async fn update_service_route_pin(
     rc: RoutingContext,
-    encoded_keys: Vec<u8>,
+    route: Vec<u8>,
     dht_key: CryptoTyped<CryptoKey>,
     key_pair: KeyPair,
 ) -> Result<(), Error> {
     info!("DHT Key: {}", dht_key);
+    let rec = rc.open_dht_record(dht_key, Some(key_pair)).await?;
+    rc.set_dht_value(*rec.key(), 0, route).await?;
+    rc.close_dht_record(*rec.key()).await?;
 
-    match rc.open_dht_record(dht_key, Some(key_pair)).await {
-        Ok(rec) => {
-            match rc.set_dht_value(*rec.key(), 0, encoded_keys).await {
-                Ok(_) => (),
-                Err(e) => {
-                    return Err(e.into());
-                }
-            }
-            rc.close_dht_record(*rec.key()).await.unwrap();
-            Ok(())
-        }
-        Err(e) => Err(e.into()),
-    }
+    Ok(())
 }
 
 pub async fn create_api_and_connect(
@@ -155,46 +135,62 @@ pub async fn create_api_and_connect(
     Ok(api)
 }
 
-pub async fn network_loop<F1, Fut1, F2, Fut2>(
+pub async fn network_loop<F1, Fut1, F2, Fut2, T>(
     api: VeilidAPI,
     receiver: Receiver<VeilidUpdate>,
     routing_context: RoutingContext,
     on_app_call: F1,
     on_app_message: F2,
+    our_route: Vec<u8>,
 ) -> Result<(), Error>
 where
-    F1: FnOnce(VeilidAPI, RoutingContext, Box<VeilidAppCall>) -> Fut1 + Send + Copy + 'static,
+    F1: FnOnce(VeilidAPI, RoutingContext, AppMessage<T>) -> Fut1 + Send + Copy + 'static,
     Fut1: Future<Output = Result<(), Error>> + Send,
-    F2: FnOnce(VeilidAPI, RoutingContext, Box<VeilidAppMessage>) -> Fut2 + Send + Copy + 'static,
+    F2: FnOnce(VeilidAPI, RoutingContext, AppMessage<T>) -> Fut2 + Send + Copy + 'static,
     Fut2: Future<Output = Result<(), Error>> + Send,
+    T: Serialize + DeserializeOwned + Send + 'static,
 {
     loop {
-        let first_msg = receiver.recv()?;
-        match first_msg {
+        let res = receiver.recv()?;
+
+        let routing_context = routing_context.clone();
+        let api = api.clone();
+        let our_route = our_route.clone();
+
+        match res {
             VeilidUpdate::AppMessage(msg) => {
-                let routing_context = routing_context.clone();
-                let api = api.clone();
+                info!("VeilidUpdate::AppMessage");
+                let mut app_message = serde_json::from_slice::<AppMessage<T>>(msg.message())?;
+                app_message.our_route = our_route;
+
                 spawn(async move {
-                    let _ = on_app_message(api, routing_context, msg.clone()).await;
+                    let _ = on_app_message(api, routing_context, app_message).await;
                 });
             }
             VeilidUpdate::AppCall(call) => {
-                let routing_context = routing_context.clone();
-                let api = api.clone();
+                info!("VeilidUpdate::AppCall");
+                let mut app_message = serde_json::from_slice::<AppMessage<T>>(call.message())?;
+                app_message.our_route = our_route;
+
                 spawn(async move {
-                    let _ = on_app_call(api, routing_context, call.clone()).await;
+                    let _ = api.app_call_reply(call.id(), b"SERVER ACK".to_vec()).await;
+                    let _ = on_app_call(api, routing_context, app_message).await;
                 });
+            }
+            VeilidUpdate::RouteChange(change) => {
+
+                // change.
             }
             _ => (),
         };
     }
 }
 
-pub async fn connect_to_route(
+pub async fn connect_to_service(
     api: VeilidAPI,
     routing_context: RoutingContext,
     service_key: TypedKey,
-) -> Result<(Target, Vec<u8>), Error> {
+) -> Result<(Target, Vec<u8>, Vec<u8>), Error> {
     info!("Looking up route on DHT: {}", service_key);
     let dht_desc = routing_context.open_dht_record(service_key, None).await?;
     let dht_val = routing_context
@@ -206,11 +202,11 @@ pub async fn connect_to_route(
     info!("DHT value: {}", String::from_utf8(dht_val.clone()).unwrap());
     routing_context.close_dht_record(*dht_desc.key()).await?;
 
-    let their_route = general_purpose::STANDARD_NO_PAD
+    let route_blob = general_purpose::STANDARD_NO_PAD
         .decode(String::from_utf8(dht_val)?)
         .unwrap();
-    let their_route_id = api.import_remote_private_route(their_route)?;
-    info!("Looking up route on DHT, done: {:?}", their_route_id);
+    let route = api.import_remote_private_route(route_blob.clone())?;
+    info!("Looking up route on DHT, done: {:?}", route);
 
     info!("Сreating a private route");
     let (_route_id, our_route) = api
@@ -222,6 +218,6 @@ pub async fn connect_to_route(
         .await?;
     info!("Сreating a private route, done");
 
-    let target = veilid_core::Target::PrivateRoute(their_route_id);
-    Ok((target, our_route))
+    let target = veilid_core::Target::PrivateRoute(route);
+    Ok((target, our_route, route_blob.clone()))
 }

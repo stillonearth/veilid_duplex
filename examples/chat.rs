@@ -2,9 +2,8 @@ use anyhow::{Context, Error};
 use base64::{engine::general_purpose, Engine as _};
 use clap::Parser;
 use flume::{unbounded, Receiver, Sender};
-use rand::distributions::Alphanumeric;
-use rand::{thread_rng, Rng};
-use tracing::{debug, info};
+use serde::{Deserialize, Serialize};
+use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 use veilid_core::tools::*;
@@ -13,8 +12,8 @@ use veilid_core::*;
 use bevy_veilid::{
     config::config_callback,
     veilid::{
-        connect_to_route, create_api_and_connect, create_service_route_pin, network_loop,
-        CRYPTO_KIND,
+        connect_to_service, create_api_and_connect, create_service_route_pin, network_loop,
+        AppMessage, CRYPTO_KIND,
     },
 };
 
@@ -26,67 +25,70 @@ struct Args {
     client: Option<String>,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+struct ChatMessage {
+    count: u64,
+}
+
 async fn on_app_message(
     api: VeilidAPI,
     rc: RoutingContext,
-    msg: Box<VeilidAppMessage>,
+    mut app_message: AppMessage<ChatMessage>,
 ) -> Result<(), Error> {
+    info!("on_app_message::Received message: {:?}\t", app_message.data);
+
+    app_message.swap_routes();
+
+    let route = api.import_remote_private_route(app_message.their_route.clone())?;
+    let target = veilid_core::Target::PrivateRoute(route.clone());
+
+    app_message.data.count += 1;
+
     info!(
-        "Received message: {}",
-        String::from_utf8(msg.message().to_vec()).unwrap().as_str()
+        "on_app_message::Sending message: {:?}\ttarget: {:?}",
+        app_message.data, target
     );
-    Ok(())
+
+    // serialize message
+
+    let app_message = serde_json::to_vec(&app_message).unwrap();
+
+    let result = rc
+        .app_message(target.clone(), app_message.to_vec())
+        .await
+        .context("app_message");
+
+    result
 }
 
 async fn on_app_call(
     api: VeilidAPI,
     rc: RoutingContext,
-    call: Box<VeilidAppCall>,
+    mut app_message: AppMessage<ChatMessage>,
 ) -> Result<(), Error> {
-    let route_id = api
-        .import_remote_private_route(call.message().to_vec())
-        .unwrap();
+    info!("on_app_call::Received message: {:?}\t", app_message.data);
 
-    info!("Remote route imported: {:?}", route_id);
+    let their_route_id = api.import_remote_private_route(app_message.their_route.clone())?;
+    let their_target = veilid_core::Target::PrivateRoute(their_route_id);
 
-    let target = veilid_core::Target::PrivateRoute(route_id);
+    app_message.swap_routes();
+    app_message.data.count += 1;
 
-    let _ = api.app_call_reply(call.id(), b"SERVER ACK".to_vec()).await;
+    info!(
+        "on_app_call::Sending message: {:?}\their_target: {:?}",
+        app_message.data, their_target
+    );
 
-    const K32: usize = 1024 * 32;
-    let mut buf = [0u8; K32]; // 32 kb
-    let tx = async {
-        info!("Sending 32k random bytes");
+    // serialize message
+    let app_message = serde_json::to_vec(&app_message)?;
 
-        loop {
-            let rand_string: String = thread_rng()
-                .sample_iter(&Alphanumeric)
-                .take(128)
-                .map(char::from)
-                .collect();
+    let result = rc
+        .app_message(their_target.clone(), app_message)
+        .await
+        .context("app_message");
+    info!("sending response, done");
 
-            let str_bytes = rand_string.as_bytes();
-            buf[0..str_bytes.len()].copy_from_slice(str_bytes);
-            debug!("SENDING FRAME");
-            let result = rc
-                .app_message(target.clone(), buf.to_vec())
-                .await
-                .context("app_message");
-
-            if result.is_err() {
-                return result.err();
-            }
-
-            tokio::time::sleep(core::time::Duration::from_millis(500)).await;
-        }
-    };
-
-    let err = tx.await;
-    if err.is_some() {
-        return Err(err.unwrap());
-    }
-
-    Ok(())
+    result
 }
 
 #[tokio::main]
@@ -133,11 +135,12 @@ async fn main() -> Result<(), Error> {
     let api = create_api_and_connect(update_callback, config_callback).await?;
 
     // Set up routing with privacy and encryption
+    let rc = api.routing_context();
+    // .with_privacy()?
+    // .with_sequencing(Sequencing::EnsureOrdered);
 
-    let rc = api
-        .routing_context()
-        .with_privacy()?
-        .with_sequencing(Sequencing::EnsureOrdered);
+    let their_route: Vec<u8>;
+    let mut our_route: Vec<u8>;
 
     if args.server {
         info!("Creating a private route");
@@ -152,20 +155,33 @@ async fn main() -> Result<(), Error> {
 
         info!("Creating a private route, done");
 
-        let route_blob: String = general_purpose::STANDARD_NO_PAD.encode(blob);
-        info!("Publishing route on DHT: {}", route_blob);
-        let route_blob = route_blob.as_bytes().to_vec();
-        create_service_route_pin(rc.clone(), key_pair.key, route_blob).await?;
-        info!("Publishing route on DHT, done");
+        our_route = general_purpose::STANDARD_NO_PAD
+            .encode(blob)
+            .as_bytes()
+            .to_vec();
+
+        create_service_route_pin(rc.clone(), key_pair.key, our_route.clone()).await?;
     } else if let Some(service_dht_str) = args.client {
         let service_dht_key = CryptoTyped::<CryptoKey>::from_str(&service_dht_str)?;
 
-        info!("Calling service");
-        let (target, our_route) =
-            connect_to_route(api.clone(), rc.clone(), service_dht_key).await?;
+        let target: Target;
+        (target, our_route, their_route) =
+            connect_to_service(api.clone(), rc.clone(), service_dht_key).await?;
+
+        info!("their route: {:?}", their_route);
+
+        let mut message = AppMessage {
+            data: ChatMessage { count: 0 },
+            our_route: our_route.clone(),
+            their_route: their_route.clone(),
+        };
+        message.swap_routes();
+        let message = serde_json::to_vec(&message).unwrap();
+
+        info!("Initiaing message exchange, targer: {:?}", target.clone());
 
         let response = rc
-            .app_call(target.clone(), our_route.clone())
+            .app_call(target.clone(), message)
             .await
             .context("app_call")?;
 
@@ -174,9 +190,20 @@ async fn main() -> Result<(), Error> {
             String::from_utf8(response).unwrap()
         );
     } else {
+        return Ok(());
     }
 
-    network_loop(api, receiver, rc.clone(), on_app_call, on_app_message).await?;
+    info!("starting network loop");
+    network_loop(
+        api.clone(),
+        receiver,
+        rc.clone(),
+        on_app_call,
+        on_app_message,
+        our_route.clone(),
+    )
+    .await?;
 
-    Ok(())
+    api.shutdown().await;
+    return Ok(());
 }
