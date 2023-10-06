@@ -22,6 +22,8 @@ use crate::config::config_callback;
 
 pub const CRYPTO_KIND: CryptoKind = CRYPTO_KIND_VLD0;
 
+// TODO: implement VeilidUpdate::RouteChange
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(bound = "T: Serialize + DeserializeOwned")]
 pub struct AppMessage<T: DeserializeOwned> {
@@ -326,6 +328,7 @@ impl P2PApp {
             let res = self.receiver.recv()?;
             let api = self.api.clone();
             let routing_context = self.routing_context.clone();
+            let their_route = self.their_route.clone();
 
             match res {
                 VeilidUpdate::AppCall(call) => {
@@ -355,6 +358,19 @@ impl P2PApp {
                 }
                 VeilidUpdate::RouteChange(change) => {
                     info!("VeilidUpdate::RouteChange: {:?}", change);
+
+                    if their_route.is_none() {
+                        continue;
+                    }
+
+                    let their_route = their_route.unwrap();
+                    let their_route: CryptoKey = api
+                        .import_remote_private_route(their_route.clone())
+                        .unwrap();
+
+                    for route in change.dead_remote_routes {
+                        info!("VeilidUpdate::RouteChange, removed: {:?}", route);
+                    }
                 }
                 _ => (),
             };
