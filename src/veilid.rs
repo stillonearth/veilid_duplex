@@ -1,10 +1,9 @@
 use std::io;
 
-use anyhow::{Error, Ok};
+use anyhow::{Context, Error, Ok};
 use base64::engine::general_purpose;
 use base64::Engine;
-use flume::Receiver;
-use futures_util::select;
+use flume::{unbounded, Receiver, Sender};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::{
@@ -18,6 +17,8 @@ use veilid_core::{
     AttachmentState::{AttachedGood, AttachedStrong, AttachedWeak, FullyAttached, OverAttached},
     *,
 };
+
+use crate::config::config_callback;
 
 pub const CRYPTO_KIND: CryptoKind = CRYPTO_KIND_VLD0;
 
@@ -138,107 +139,225 @@ pub async fn create_api_and_connect(
 pub struct P2PApp {
     api: VeilidAPI,
     routing_context: RoutingContext,
-    our_route: Vec<u8>,
     receiver: Receiver<VeilidUpdate>,
+    our_route: Option<Vec<u8>>,
+    their_route: Option<Vec<u8>>,
 }
 
 impl P2PApp {
-    pub fn new(
-        api: VeilidAPI,
-        routing_context: RoutingContext,
-        our_route: Vec<u8>,
-        receiver: Receiver<VeilidUpdate>,
-    ) -> Self {
-        Self {
-            api,
-            routing_context,
-            our_route,
-            receiver,
-        }
+    async fn initialize() -> Result<(VeilidAPI, RoutingContext, Receiver<VeilidUpdate>), Error> {
+        let (sender, receiver): (
+            Sender<veilid_core::VeilidUpdate>,
+            Receiver<veilid_core::VeilidUpdate>,
+        ) = unbounded();
+
+        // Create VeilidCore setup
+        let update_callback = Arc::new(move |change: veilid_core::VeilidUpdate| {
+            if let Err(e) = sender.send(change) {
+                // Don't log here, as that loops the update callback in some cases and will deadlock
+                let change = e.into_inner();
+                info!("error sending veilid update callback: {:?}", change);
+            }
+        });
+
+        let veilid_storage_dir = tempfile::tempdir()?.path().to_path_buf();
+        let key_pair = veilid_core::Crypto::generate_keypair(CRYPTO_KIND)
+            .unwrap()
+            .value;
+
+        let config_callback = Arc::new(move |key| {
+            config_callback(
+                veilid_storage_dir.clone(),
+                CryptoTyped::new(CRYPTO_KIND, key_pair),
+                key,
+            )
+        });
+
+        let api = create_api_and_connect(update_callback, config_callback).await?;
+
+        // Set up routing with privacy and encryption
+        let rc = api
+            .routing_context()
+            .with_privacy()?
+            .with_sequencing(Sequencing::PreferOrdered);
+
+        Ok((api, rc, receiver))
     }
 
-    pub async fn network_loop<F1, Fut1, F2, Fut2, T>(
-        self,
-        on_app_call: F1,
-        on_app_message: F2,
-        our_route: Vec<u8>,
-    ) -> Result<(), Error>
+    pub async fn new_host() -> Result<Self, Error> {
+        let (api, routing_context, receiver) = Self::initialize().await?;
+        let mut app = Self {
+            api,
+            routing_context,
+            receiver,
+            our_route: None,
+            their_route: None,
+        };
+
+        app.start_host().await?;
+
+        Ok(app)
+    }
+
+    pub async fn new_client(service_key: CryptoTyped<CryptoKey>) -> Result<Self, Error> {
+        let (api, routing_context, receiver) = Self::initialize().await?;
+        let mut app = Self {
+            api,
+            routing_context,
+            receiver,
+            our_route: None,
+            their_route: None,
+        };
+
+        app.start_client(service_key).await?;
+
+        Ok(app)
+    }
+
+    async fn start_host(&mut self) -> Result<(), Error> {
+        info!("Creating a private route");
+        let (_route_id, blob) = self
+            .api
+            .new_custom_private_route(
+                &[CRYPTO_KIND],
+                veilid_core::Stability::Reliable,
+                veilid_core::Sequencing::PreferOrdered,
+            )
+            .await
+            .context("new_custom_private_route")?;
+
+        info!("Creating a private route, done");
+
+        let service_key = general_purpose::STANDARD_NO_PAD
+            .encode(blob.clone())
+            .as_bytes()
+            .to_vec();
+        self.our_route = Some(blob.clone());
+
+        let key_pair = veilid_core::Crypto::generate_keypair(CRYPTO_KIND)
+            .unwrap()
+            .value;
+
+        create_service_route_pin(
+            self.routing_context.clone(),
+            key_pair.key,
+            service_key.clone(),
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    async fn start_client(&mut self, service_key: CryptoTyped<CryptoKey>) -> Result<(), Error> {
+        info!("Looking up route on DHT: {}", service_key);
+        let dht_desc = self
+            .routing_context
+            .open_dht_record(service_key, None)
+            .await?;
+
+        let dht_val = self
+            .routing_context
+            .get_dht_value(*dht_desc.key(), 0, true)
+            .await?
+            .ok_or(io::Error::new(io::ErrorKind::Other, "DHT value not found"))?
+            .data()
+            .to_vec();
+        info!("DHT value: {}", String::from_utf8(dht_val.clone()).unwrap());
+        self.routing_context
+            .close_dht_record(*dht_desc.key())
+            .await?;
+
+        let their_route_blob = general_purpose::STANDARD_NO_PAD
+            .decode(String::from_utf8(dht_val)?)
+            .unwrap();
+        let their_route = self
+            .api
+            .import_remote_private_route(their_route_blob.clone())?;
+        info!("Looking up route on DHT, done: {:?}", their_route);
+
+        info!("Сreating a private route");
+        let (_, our_route_blob) = self
+            .api
+            .new_custom_private_route(
+                &[CRYPTO_KIND],
+                veilid_core::Stability::Reliable,
+                veilid_core::Sequencing::EnsureOrdered,
+            )
+            .await?;
+        info!("Сreating a private route, done");
+
+        self.our_route = Some(our_route_blob);
+        self.their_route = Some(their_route_blob);
+
+        Ok(())
+    }
+
+    pub async fn call_host<T: DeserializeOwned>(&self, data: T) -> Result<Vec<u8>, Error>
     where
-        F1: FnOnce(VeilidAPI, RoutingContext, AppMessage<T>) -> Fut1 + Send + Copy + 'static,
-        Fut1: Future<Output = Result<(), Error>> + Send,
-        F2: FnOnce(VeilidAPI, RoutingContext, AppMessage<T>) -> Fut2 + Send + Copy + 'static,
-        Fut2: Future<Output = Result<(), Error>> + Send,
-        F2: FnOnce(VeilidAPI, RoutingContext, AppMessage<T>) -> Fut2 + Send + Copy + 'static,
+        T: Serialize + DeserializeOwned + Send + 'static,
+    {
+        let app_message = AppMessage {
+            data,
+            our_route: self.our_route.clone().unwrap(),
+            their_route: self.their_route.clone().unwrap(),
+        };
+        // message.swap_routes();
+        let app_message_blob = serde_json::to_vec(&app_message).unwrap();
+
+        let route = self
+            .api
+            .import_remote_private_route(app_message.their_route.clone())?;
+        let target = veilid_core::Target::PrivateRoute(route);
+
+        info!("Initiaing message exchange, target: {:?}", target.clone());
+
+        self.routing_context
+            .app_call(target.clone(), app_message_blob)
+            .await
+            .context("app_call")
+    }
+
+    pub async fn network_loop<F, T>(self, on_remote_call: F) -> Result<(), Error>
+    where
+        F: FnOnce(T) -> T + Send + Copy + 'static,
         T: Serialize + DeserializeOwned + Send + 'static,
     {
         loop {
             let res = self.receiver.recv()?;
-
-            let routing_context = self.routing_context.clone();
             let api = self.api.clone();
-            let our_route = our_route.clone();
+            let routing_context = self.routing_context.clone();
 
             match res {
-                VeilidUpdate::AppMessage(msg) => {
-                    info!("VeilidUpdate::AppMessage");
-                    let mut app_message = serde_json::from_slice::<AppMessage<T>>(msg.message())?;
-                    app_message.our_route = our_route;
-
-                    spawn(async move {
-                        let _ = on_app_message(api, routing_context, app_message).await;
-                    });
-                }
                 VeilidUpdate::AppCall(call) => {
                     info!("VeilidUpdate::AppCall");
                     let mut app_message = serde_json::from_slice::<AppMessage<T>>(call.message())?;
-                    app_message.our_route = our_route;
+                    app_message.their_route = self.our_route.clone().unwrap();
+                    app_message.swap_routes();
+                    app_message.data = on_remote_call(app_message.data);
 
                     spawn(async move {
                         let _ = api.app_call_reply(call.id(), b"ACK".to_vec()).await;
-                        let _ = on_app_call(api, routing_context, app_message).await;
+
+                        let app_message_blob = serde_json::to_vec(&app_message).unwrap();
+
+                        let route: CryptoKey = api
+                            .import_remote_private_route(app_message.their_route.clone())
+                            .unwrap();
+                        let target = veilid_core::Target::PrivateRoute(route);
+
+                        info!("VeilidUpdate::AppCall, targer: {:?}", target.clone());
+
+                        let _ = routing_context
+                            .app_call(target.clone(), app_message_blob)
+                            .await
+                            .context("app_call");
                     });
                 }
                 VeilidUpdate::RouteChange(change) => {
-                    info!("change: {:?}", change);
+                    info!("VeilidUpdate::RouteChange: {:?}", change);
                 }
                 _ => (),
             };
         }
     }
-}
-
-pub async fn connect_to_service(
-    api: VeilidAPI,
-    routing_context: RoutingContext,
-    service_key: TypedKey,
-) -> Result<(Target, Vec<u8>, Vec<u8>), Error> {
-    info!("Looking up route on DHT: {}", service_key);
-    let dht_desc = routing_context.open_dht_record(service_key, None).await?;
-    let dht_val = routing_context
-        .get_dht_value(*dht_desc.key(), 0, true)
-        .await?
-        .ok_or(io::Error::new(io::ErrorKind::Other, "DHT value not found"))?
-        .data()
-        .to_vec();
-    info!("DHT value: {}", String::from_utf8(dht_val.clone()).unwrap());
-    routing_context.close_dht_record(*dht_desc.key()).await?;
-
-    let route_blob = general_purpose::STANDARD_NO_PAD
-        .decode(String::from_utf8(dht_val)?)
-        .unwrap();
-    let route = api.import_remote_private_route(route_blob.clone())?;
-    info!("Looking up route on DHT, done: {:?}", route);
-
-    info!("Сreating a private route");
-    let (_route_id, our_route) = api
-        .new_custom_private_route(
-            &[CRYPTO_KIND],
-            veilid_core::Stability::Reliable,
-            veilid_core::Sequencing::EnsureOrdered,
-        )
-        .await?;
-    info!("Сreating a private route, done");
-
-    let target = veilid_core::Target::PrivateRoute(route);
-    Ok((target, our_route, route_blob.clone()))
 }
