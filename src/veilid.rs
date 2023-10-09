@@ -1,4 +1,5 @@
 use std::io;
+use std::sync::Arc;
 
 use anyhow::{Context, Error, Ok};
 use base64::engine::general_purpose;
@@ -8,6 +9,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::{
     spawn,
+    sync::Mutex,
     time::{sleep, Duration},
 };
 use tracing::info;
@@ -22,8 +24,6 @@ use crate::config::config_callback;
 
 pub const CRYPTO_KIND: CryptoKind = CRYPTO_KIND_VLD0;
 
-// TODO: implement VeilidUpdate::RouteChange
-
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(bound = "T: Serialize + DeserializeOwned")]
 pub struct AppMessage<T: DeserializeOwned> {
@@ -32,9 +32,32 @@ pub struct AppMessage<T: DeserializeOwned> {
     pub our_route: Vec<u8>,
 }
 
-impl<T: DeserializeOwned> AppMessage<T> {
+impl<T: DeserializeOwned + Serialize> AppMessage<T> {
     pub fn swap_routes(&mut self) {
         std::mem::swap(&mut self.their_route, &mut self.our_route);
+    }
+
+    async fn send(
+        &self,
+        api: &VeilidAPI,
+        routing_context: &RoutingContext,
+    ) -> Result<Vec<u8>, Error> {
+        let app_message_blob = serde_json::to_vec(self).unwrap();
+
+        // Check if blob size > 32kb and fire an error
+        if app_message_blob.len() > 32 * 1024 {
+            return Err(io::Error::new(io::ErrorKind::Other, "Message size exceeds 32kb").into());
+        }
+
+        let route = api.import_remote_private_route(self.their_route.clone())?;
+        let target = veilid_core::Target::PrivateRoute(route);
+
+        info!("Sending message, target: {:?}", target.clone());
+
+        routing_context
+            .app_call(target.clone(), app_message_blob)
+            .await
+            .context("app_call")
     }
 }
 
@@ -142,8 +165,14 @@ pub struct P2PApp {
     api: VeilidAPI,
     routing_context: RoutingContext,
     receiver: Receiver<VeilidUpdate>,
-    our_route: Option<Vec<u8>>,
+    our_route: Vec<u8>,
     their_route: Option<Vec<u8>>,
+    service_key: CryptoTyped<CryptoKey>,
+}
+
+pub struct P2PAppRoutes {
+    pub our_route: Vec<u8>,
+    pub their_route: Vec<u8>,
 }
 
 impl P2PApp {
@@ -188,38 +217,9 @@ impl P2PApp {
 
     pub async fn new_host() -> Result<Self, Error> {
         let (api, routing_context, receiver) = Self::initialize().await?;
-        let mut app = Self {
-            api,
-            routing_context,
-            receiver,
-            our_route: None,
-            their_route: None,
-        };
 
-        app.start_host().await?;
-
-        Ok(app)
-    }
-
-    pub async fn new_client(service_key: CryptoTyped<CryptoKey>) -> Result<Self, Error> {
-        let (api, routing_context, receiver) = Self::initialize().await?;
-        let mut app = Self {
-            api,
-            routing_context,
-            receiver,
-            our_route: None,
-            their_route: None,
-        };
-
-        app.start_client(service_key).await?;
-
-        Ok(app)
-    }
-
-    async fn start_host(&mut self) -> Result<(), Error> {
         info!("Creating a private route");
-        let (_route_id, blob) = self
-            .api
+        let (_route_id, blob) = api
             .new_custom_private_route(
                 &[CRYPTO_KIND],
                 veilid_core::Stability::Reliable,
@@ -228,58 +228,79 @@ impl P2PApp {
             .await
             .context("new_custom_private_route")?;
 
-        info!("Creating a private route, done");
-
-        let service_key = general_purpose::STANDARD_NO_PAD
+        let service_key_blob = general_purpose::STANDARD_NO_PAD
             .encode(blob.clone())
             .as_bytes()
             .to_vec();
-        self.our_route = Some(blob.clone());
 
         let key_pair = veilid_core::Crypto::generate_keypair(CRYPTO_KIND)
             .unwrap()
             .value;
 
         create_service_route_pin(
-            self.routing_context.clone(),
+            routing_context.clone(),
             key_pair.key,
-            service_key.clone(),
+            service_key_blob.clone(),
         )
         .await?;
 
-        Ok(())
+        let service_key = api.import_remote_private_route(blob.clone())?;
+        let service_key = CryptoTyped::<CryptoKey>::new(best_crypto_kind(), service_key);
+
+        info!("Our own service key: {:?}", service_key);
+
+        Ok(Self {
+            api,
+            routing_context,
+            receiver,
+            service_key,
+            our_route: blob.clone(),
+            their_route: None,
+        })
     }
 
-    async fn start_client(&mut self, service_key: CryptoTyped<CryptoKey>) -> Result<(), Error> {
-        info!("Looking up route on DHT: {}", service_key);
-        let dht_desc = self
-            .routing_context
-            .open_dht_record(service_key, None)
-            .await?;
+    pub async fn new_client(service_key: CryptoTyped<CryptoKey>) -> Result<Self, Error> {
+        let (api, routing_context, receiver) = Self::initialize().await?;
 
-        let dht_val = self
-            .routing_context
+        let (our_route_blob, their_route_blob) =
+            P2PApp::get_service_route(api.clone(), routing_context.clone(), service_key).await?;
+
+        Ok(Self {
+            api,
+            routing_context,
+            receiver,
+            service_key: service_key,
+            our_route: our_route_blob,
+            their_route: Some(their_route_blob),
+        })
+    }
+
+    async fn get_service_route(
+        api: VeilidAPI,
+        routing_context: RoutingContext,
+        service_key: CryptoTyped<CryptoKey>,
+    ) -> Result<(Vec<u8>, Vec<u8>), Error> {
+        info!("Looking up route on DHT: {}", service_key);
+        let service_key = CryptoTyped::<CryptoKey>::from(service_key);
+        let dht_desc = routing_context.open_dht_record(service_key, None).await?;
+
+        let dht_val = routing_context
             .get_dht_value(*dht_desc.key(), 0, true)
             .await?
             .ok_or(io::Error::new(io::ErrorKind::Other, "DHT value not found"))?
             .data()
             .to_vec();
         info!("DHT value: {}", String::from_utf8(dht_val.clone()).unwrap());
-        self.routing_context
-            .close_dht_record(*dht_desc.key())
-            .await?;
+        routing_context.close_dht_record(*dht_desc.key()).await?;
 
         let their_route_blob = general_purpose::STANDARD_NO_PAD
             .decode(String::from_utf8(dht_val)?)
             .unwrap();
-        let their_route = self
-            .api
-            .import_remote_private_route(their_route_blob.clone())?;
+        let their_route = api.import_remote_private_route(their_route_blob.clone())?;
         info!("Looking up route on DHT, done: {:?}", their_route);
 
         info!("Сreating a private route");
-        let (_, our_route_blob) = self
-            .api
+        let (_, our_route_blob) = api
             .new_custom_private_route(
                 &[CRYPTO_KIND],
                 veilid_core::Stability::Reliable,
@@ -288,88 +309,115 @@ impl P2PApp {
             .await?;
         info!("Сreating a private route, done");
 
-        self.our_route = Some(our_route_blob);
-        self.their_route = Some(their_route_blob);
-
-        Ok(())
+        Ok((our_route_blob, their_route_blob))
     }
 
-    pub async fn call_host<T: DeserializeOwned>(&self, data: T) -> Result<Vec<u8>, Error>
+    pub async fn app_call_host<T: DeserializeOwned>(&self, data: T) -> Result<Vec<u8>, Error>
     where
         T: Serialize + DeserializeOwned + Send + 'static,
     {
         let app_message = AppMessage {
             data,
-            our_route: self.our_route.clone().unwrap(),
+            our_route: self.our_route.clone(),
             their_route: self.their_route.clone().unwrap(),
         };
-        // message.swap_routes();
-        let app_message_blob = serde_json::to_vec(&app_message).unwrap();
 
-        let route = self
-            .api
-            .import_remote_private_route(app_message.their_route.clone())?;
-        let target = veilid_core::Target::PrivateRoute(route);
+        app_message.send(&self.api, &self.routing_context).await
+    }
 
-        info!("Initiaing message exchange, target: {:?}", target.clone());
+    async fn app_call_host_reply<T: DeserializeOwned + Serialize>(
+        api: VeilidAPI,
+        routing_context: RoutingContext,
+        id: AlignedU64,
+        app_message: AppMessage<T>,
+    ) -> Result<(), Error> {
+        let reply_result = api.app_call_reply(id, b"ACK".to_vec()).await;
+        if reply_result.is_err() {
+            return Err(reply_result.err().unwrap().into());
+        }
 
-        self.routing_context
-            .app_call(target.clone(), app_message_blob)
-            .await
-            .context("app_call")
+        let app_message_result = app_message.send(&api, &routing_context).await;
+        if app_message_result.is_err() {
+            return Err(app_message_result.err().unwrap().into());
+        }
+        return Ok(());
     }
 
     pub async fn network_loop<F, T>(self, on_remote_call: F) -> Result<(), Error>
     where
         F: FnOnce(T) -> T + Send + Copy + 'static,
-        T: Serialize + DeserializeOwned + Send + 'static,
+        T: Serialize + DeserializeOwned + Send + Sync + Clone + 'static,
     {
+        let reciever = self.receiver.clone();
+        let api = self.api.clone();
+        let routing_context = self.routing_context.clone();
+        let app = Arc::new(Mutex::new(self));
+
         loop {
-            let res = self.receiver.recv()?;
-            let api = self.api.clone();
-            let routing_context = self.routing_context.clone();
-            let their_route = self.their_route.clone();
+            let res = reciever.recv()?;
+            let app = app.clone();
+            let api = api.clone();
+            let routing_context = routing_context.clone();
 
             match res {
                 VeilidUpdate::AppCall(call) => {
                     info!("VeilidUpdate::AppCall");
                     let mut app_message = serde_json::from_slice::<AppMessage<T>>(call.message())?;
-                    app_message.their_route = self.our_route.clone().unwrap();
-                    app_message.swap_routes();
+
+                    {
+                        let mut app: AsyncMutexGuard<'_, P2PApp> = app.lock().await;
+                        app.their_route = Some(app_message.our_route.clone());
+                    }
+
                     app_message.data = on_remote_call(app_message.data);
 
+                    // call.i
+
                     spawn(async move {
-                        let _ = api.app_call_reply(call.id(), b"ACK".to_vec()).await;
+                        loop {
+                            let app = app.lock().await;
+                            let mut app_message = app_message.clone();
+                            app_message.our_route = app.our_route.clone();
+                            app_message.their_route = app.their_route.clone().unwrap();
 
-                        let app_message_blob = serde_json::to_vec(&app_message).unwrap();
+                            let result = P2PApp::app_call_host_reply(
+                                api.clone(),
+                                routing_context.clone(),
+                                call.id(),
+                                app_message,
+                            )
+                            .await;
 
-                        let route: CryptoKey = api
-                            .import_remote_private_route(app_message.their_route.clone())
-                            .unwrap();
-                        let target = veilid_core::Target::PrivateRoute(route);
-
-                        info!("VeilidUpdate::AppCall, targer: {:?}", target.clone());
-
-                        let _ = routing_context
-                            .app_call(target.clone(), app_message_blob)
-                            .await
-                            .context("app_call");
+                            if result.is_ok() {
+                                break;
+                            }
+                        }
                     });
                 }
                 VeilidUpdate::RouteChange(change) => {
-                    info!("VeilidUpdate::RouteChange: {:?}", change);
+                    let mut app = app.lock().await;
 
-                    if their_route.is_none() {
+                    info!("VeilidUpdate::RouteChange, {:?}", change);
+                    if app.their_route.is_none() {
                         continue;
                     }
-
-                    let their_route = their_route.unwrap();
-                    let their_route: CryptoKey = api
-                        .import_remote_private_route(their_route.clone())
-                        .unwrap();
+                    let their_route: CryptoKey = app
+                        .api
+                        .import_remote_private_route(app.their_route.clone().unwrap())?;
 
                     for route in change.dead_remote_routes {
-                        info!("VeilidUpdate::RouteChange, removed: {:?}", route);
+                        // update remote route if it's dead
+                        if their_route == route {
+                            let (our_route, their_route) = P2PApp::get_service_route(
+                                app.api.clone(),
+                                app.routing_context.clone(),
+                                app.service_key,
+                            )
+                            .await?;
+
+                            app.our_route = our_route;
+                            app.their_route = Some(their_route);
+                        }
                     }
                 }
                 _ => (),

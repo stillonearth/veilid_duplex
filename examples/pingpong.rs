@@ -52,7 +52,7 @@ async fn main() -> Result<(), Error> {
         let service_dht_key = CryptoTyped::<CryptoKey>::from_str(&service_dht_str)?;
         app = P2PApp::new_client(service_dht_key).await?;
 
-        app.call_host(ChatMessage { count: 0 }).await?;
+        app.app_call_host(ChatMessage { count: 0 }).await?;
     } else {
         return Ok(());
     }
