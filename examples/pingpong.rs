@@ -7,7 +7,7 @@ use tracing_subscriber::EnvFilter;
 use veilid_core::tools::*;
 use veilid_core::*;
 
-use bevy_veilid::{utils::get_service_route_from_dht, veilid::P2PApp};
+use veilid_duplex::{utils::get_service_route_from_dht, veilid::P2PApp};
 
 #[derive(Parser, Debug)]
 struct Args {
