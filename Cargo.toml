@@ -1,5 +1,5 @@
 [package]
-name = "bevy_veilid"
+name = "veilid_duplex"
 version = "0.1.0"
 edition = "2021"
 
