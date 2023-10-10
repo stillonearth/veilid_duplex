@@ -7,7 +7,7 @@ use tracing_subscriber::EnvFilter;
 use veilid_core::tools::*;
 use veilid_core::*;
 
-use bevy_veilid::veilid::P2PApp;
+use bevy_veilid::{utils::get_service_route_from_dht, veilid::P2PApp};
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -31,6 +31,10 @@ fn on_remote_call(chat_message: ChatMessage) -> ChatMessage {
     chat_message
 }
 
+fn on_halt() {
+    info!("Ther peer seems offline!");
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     let args = Args::parse();
@@ -45,19 +49,22 @@ async fn main() -> Result<(), Error> {
         .with_env_filter(env_filter)
         .init();
 
-    let app: P2PApp;
-    if args.server {
-        app = P2PApp::new_host().await?;
-    } else if let Some(service_dht_str) = args.client {
-        let service_dht_key = CryptoTyped::<CryptoKey>::from_str(&service_dht_str)?;
-        app = P2PApp::new_client(service_dht_key).await?;
+    let app: P2PApp = P2PApp::new().await?;
+    let api = app.api.clone();
+    let routing_context = app.routing_context.clone();
 
-        app.app_call_host(ChatMessage { count: 0 }).await?;
-    } else {
-        return Ok(());
+    if let Some(service_dht_str) = args.client {
+        let service_dht_key = CryptoTyped::<CryptoKey>::from_str(&service_dht_str)?;
+        let (target, _, their_route) =
+            get_service_route_from_dht(api, routing_context, service_dht_key, true).await?;
+
+        info!("their route: {}", their_route);
+
+        app.send_app_message(ChatMessage { count: 0 }, target)
+            .await?;
     }
 
     info!("Starting network loop");
-    app.network_loop(on_remote_call).await?;
+    app.network_loop(on_remote_call, on_halt).await?;
     Ok(())
 }

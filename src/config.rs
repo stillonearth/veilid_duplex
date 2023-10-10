@@ -1,9 +1,7 @@
 use veilid_core::{
-    ConfigCallbackReturn, CryptoTyped, FourCC, KeyPair, TypedKeyGroup, TypedSecretGroup,
-    VeilidAPIError,
+    best_crypto_kind, ConfigCallbackReturn, CryptoTyped, FourCC, KeyPair, TypedKeyGroup,
+    TypedSecretGroup, VeilidAPIError,
 };
-
-use crate::veilid::CRYPTO_KIND;
 
 pub fn config_callback(
     veilid_storage_dir: std::path::PathBuf,
@@ -62,7 +60,7 @@ pub fn config_callback(
         "network.routing_table.node_id" => {
             let mut group = TypedKeyGroup::new();
             group.add(veilid_core::CryptoTyped::new(
-                CRYPTO_KIND,
+                best_crypto_kind(),
                 key_pair.value.key,
             ));
             Ok(Box::new(group))
@@ -70,7 +68,7 @@ pub fn config_callback(
         "network.routing_table.node_id_secret" => {
             let mut group = TypedSecretGroup::new();
             group.add(veilid_core::CryptoTyped::new(
-                CRYPTO_KIND,
+                best_crypto_kind(),
                 key_pair.value.secret,
             ));
             Ok(Box::new(group))
