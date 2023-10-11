@@ -1,5 +1,7 @@
 use std::collections::hash_map::Entry::Vacant;
+use std::future::Future;
 use std::io;
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Error, Ok};
@@ -13,6 +15,7 @@ use tokio::{
     time::{sleep, Duration},
 };
 use tracing::info;
+use uuid::Uuid;
 
 use veilid_core::tools::*;
 use veilid_core::*;
@@ -20,13 +23,47 @@ use veilid_core::*;
 use crate::config::config_callback;
 use crate::utils::*;
 
-const SEND_ATTEMPTS: u8 = 64;
+const SEND_ATTEMPTS: u16 = 1024;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(bound = "T: Serialize + DeserializeOwned")]
 pub struct AppMessage<T: DeserializeOwned> {
     pub data: T,
     pub dht_record: CryptoTyped<CryptoKey>,
+}
+
+#[derive(Clone)]
+pub struct P2PAppRoutes {
+    routes: HashMap<CryptoKey, Target>,
+}
+
+impl P2PAppRoutes {
+    pub async fn get_route(
+        &mut self,
+        remote_dht_record: CryptoTyped<CryptoKey>,
+        api: VeilidAPI,
+        routing_context: RoutingContext,
+    ) -> Result<Target, Error> {
+        if let Vacant(e) = self.routes.entry(remote_dht_record.value) {
+            let (target, _) = get_service_route_from_dht(
+                api.clone(),
+                routing_context.clone(),
+                remote_dht_record,
+                true,
+            )
+            .await?;
+
+            e.insert(target);
+        }
+        Ok(self.routes.get(&remote_dht_record.value).unwrap().clone())
+    }
+
+    fn remove_route_if_exists(&mut self, dead_route: CryptoKey) {
+        if self.routes.contains_key(&dead_route) {
+            self.routes.remove(&dead_route);
+            info!("DHT value for route {:} removed", dead_route);
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -37,12 +74,12 @@ pub struct P2PApp {
     pub our_route: CryptoKey,
     pub our_dht_key: CryptoTyped<CryptoKey>,
     pub key_pair: KeyPair,
+    pub routes: Arc<Mutex<P2PAppRoutes>>,
 }
 
 impl<T: DeserializeOwned + Serialize> AppMessage<T> {
-    async fn send(
+    pub async fn send(
         &self,
-        _api: &VeilidAPI,
         routing_context: &RoutingContext,
         target: Target,
     ) -> Result<Vec<u8>, Error> {
@@ -83,7 +120,11 @@ impl P2PApp {
             }
         });
 
-        let veilid_storage_dir = tempfile::tempdir()?.path().to_path_buf();
+        let id = Uuid::new_v4();
+        let veilid_storage_dir = tempfile::tempdir()?
+            .path()
+            .join(Path::new(&id.to_string()))
+            .to_path_buf();
         let key_pair = veilid_core::Crypto::generate_keypair(best_crypto_kind())
             .unwrap()
             .value;
@@ -119,111 +160,85 @@ impl P2PApp {
         )
         .await?;
 
+        let routes = Arc::new(Mutex::new(P2PAppRoutes {
+            routes: HashMap::new(),
+        }));
+
         Ok(Self {
             api,
             routing_context,
             receiver,
             key_pair,
             our_route,
+            routes,
             our_dht_key,
         })
     }
 
-    pub async fn send_app_message<T: DeserializeOwned>(
+    pub async fn send_message<T: DeserializeOwned>(
         &self,
-        data: T,
-        target: Target,
-    ) -> Result<Vec<u8>, Error>
+        app_message: AppMessage<T>,
+        remote_dht_record: CryptoTyped<CryptoKey>,
+    ) -> Result<(), Error>
     where
         T: Serialize + DeserializeOwned + Send + 'static,
     {
-        let app_message = AppMessage {
-            data,
-            dht_record: self.our_dht_key,
-        };
+        let routes = self.routes.clone();
+        for attempt_n in 0..SEND_ATTEMPTS {
+            let mut routes = routes.lock().await;
+            let target = routes
+                .get_route(
+                    remote_dht_record,
+                    self.api.clone(),
+                    self.routing_context.clone(),
+                )
+                .await?;
 
-        info!("app_call_host, dht_record: {:}", app_message.dht_record);
+            let result = app_message.send(&self.routing_context, target).await;
+            if result.is_ok() {
+                break;
+            } else if result.is_err() {
+                info!("Unable to send message, sleeping 500ms");
+                sleep(Duration::from_millis(500)).await;
+                continue;
+            }
 
-        app_message
-            .send(&self.api, &self.routing_context, target)
-            .await
+            if attempt_n == (SEND_ATTEMPTS - 1) {
+                return Err(io::Error::new(io::ErrorKind::Other, "Couldn't send reply").into());
+            }
+        }
+        Ok(())
     }
 
-    pub async fn network_loop<F1, F2, T>(
-        mut self,
-        on_app_message: F1,
-        on_communication_halt: F2,
-    ) -> Result<(), Error>
+    pub async fn network_loop<F, T, Fut>(&mut self, on_app_message: F) -> Result<(), Error>
     where
-        F1: FnOnce(T) -> T + Send + Copy + 'static,
-        F2: FnOnce() + Send + Copy + 'static,
+        F: FnOnce(AppMessage<T>) -> Fut + Send + Clone + 'static,
         T: Serialize + DeserializeOwned + Send + Sync + Clone + 'static,
+        Fut: Future<Output = ()> + Send,
     {
-        let reciever = self.receiver;
-        let api = self.api;
-        let routing_context = self.routing_context;
-        let routes = Arc::new(Mutex::new(HashMap::<CryptoKey, Target>::new()));
+        let reciever = self.receiver.clone();
+        let api = self.api.clone();
+        let routing_context = self.routing_context.clone();
 
         loop {
             let res = reciever.recv()?;
             let api = api.clone();
             let routing_context = routing_context.clone();
-            let routes = routes.clone();
+            let routes = self.routes.clone();
+            let on_app_message = on_app_message.clone();
 
             match res {
                 VeilidUpdate::AppCall(call) => {
                     info!("VeilidUpdate::AppMessage");
-                    let mut app_message = serde_json::from_slice::<AppMessage<T>>(call.message())?;
-
-                    app_message.data = on_app_message(app_message.data);
-                    let remote_dht_record = app_message.dht_record;
-                    app_message.dht_record = self.our_dht_key;
-                    let on_halt = on_communication_halt;
 
                     spawn(async move {
-                        let result = api.app_call_reply(call.id(), b"ACK".to_vec()).await;
-                        if result.is_err() {
-                            info!("Unable to send ACK");
-                            return;
-                        }
+                        let app_message =
+                            serde_json::from_slice::<AppMessage<T>>(call.message()).unwrap();
+                        api.app_call_reply(call.id(), b"ACK".to_vec())
+                            .await
+                            .unwrap();
 
-                        for attempt_n in 0..SEND_ATTEMPTS {
-                            let mut routes = routes.lock().await;
-                            if let Vacant(e) = routes.entry(app_message.dht_record.value) {
-                                let result = get_service_route_from_dht(
-                                    api.clone(),
-                                    routing_context.clone(),
-                                    remote_dht_record,
-                                    true,
-                                )
-                                .await;
-                                if result.is_err() {
-                                    info!("Unable to get route from dht, waiting 500ms");
-                                    info!("error: {:?}", result.err());
-                                    sleep(Duration::from_millis(500)).await;
-                                    continue;
-                                }
-                                let (target, _, _) = result.unwrap();
-                                e.insert(target);
-                            }
-                            let target = routes.get(&app_message.dht_record.value).unwrap().clone();
-
-                            let result = app_message.send(&api, &routing_context, target).await;
-                            if result.is_ok() {
-                                break;
-                            } else if result.is_err() {
-                                info!("Unable to send message, sleeping 500ms");
-                                sleep(Duration::from_millis(500)).await;
-                                continue;
-                            }
-
-                            if attempt_n == (SEND_ATTEMPTS - 1) {
-                                on_halt();
-                                // on_communication_halt();
-                            }
-                        }
-
-                        // info!("Unable to send message after 32 tries");
+                        on_app_message(app_message).await;
                     });
                 }
                 VeilidUpdate::RouteChange(change) => {
@@ -245,11 +260,8 @@ impl P2PApp {
                     }
 
                     let mut routes = routes.lock().await;
-                    for route in change.dead_remote_routes {
-                        if routes.contains_key(&route) {
-                            routes.remove(&route);
-                            info!("DHT value for route {:} removed", route);
-                        }
+                    for dead_route in change.dead_remote_routes {
+                        routes.remove_route_if_exists(dead_route);
                     }
                 }
                 _ => (),

@@ -17,7 +17,7 @@ pub async fn get_service_route_from_dht(
     routing_context: RoutingContext,
     service_key: CryptoTyped<CryptoKey>,
     force_refresh: bool,
-) -> Result<(Target, CryptoKey, CryptoKey), Error> {
+) -> Result<(Target, CryptoKey), Error> {
     info!("Looking up route on DHT: {}", service_key);
     let service_key = service_key;
     let dht_desc = routing_context.open_dht_record(service_key, None).await?;
@@ -28,28 +28,27 @@ pub async fn get_service_route_from_dht(
         .ok_or(io::Error::new(io::ErrorKind::Other, "DHT value not found"))?
         .data()
         .to_vec();
-    info!("DHT value: {}", String::from_utf8(dht_val.clone()).unwrap());
-    routing_context.close_dht_record(*dht_desc.key()).await?;
 
+    routing_context.close_dht_record(*dht_desc.key()).await?;
     let their_route_blob = general_purpose::STANDARD_NO_PAD
         .decode(String::from_utf8(dht_val)?)
         .unwrap();
     let their_route = api.import_remote_private_route(their_route_blob.clone())?;
     info!("Looking up route on DHT, done: {:?}", their_route);
 
-    info!("Сreating a private route");
-    let (our_route, _) = api
-        .new_custom_private_route(
-            &[best_crypto_kind()],
-            veilid_core::Stability::Reliable,
-            veilid_core::Sequencing::EnsureOrdered,
-        )
-        .await?;
-    info!("Сreating a private route, done");
+    // info!("Сreating a private route");
+    // let (our_route, _) = api
+    //     .new_custom_private_route(
+    //         &[best_crypto_kind()],
+    //         veilid_core::Stability::Reliable,
+    //         veilid_core::Sequencing::EnsureOrdered,
+    //     )
+    //     .await?;
+    // info!("Сreating a private route, done");
 
     let target = veilid_core::Target::PrivateRoute(their_route);
 
-    Ok((target, our_route, their_route))
+    Ok((target, their_route))
 }
 
 pub(crate) async fn create_private_route(api: VeilidAPI) -> Result<(CryptoKey, Vec<u8>), Error> {
@@ -134,15 +133,15 @@ pub(crate) async fn create_service_route_pin(
     member_key: PublicKey,
     route: Vec<u8>,
 ) -> Result<CryptoTyped<CryptoKey>, Error> {
-    let owner_subkey_count = 1;
+    let subkey_count = 1;
 
     let rec = rc
         .create_dht_record(
             DHTSchema::SMPL(DHTSchemaSMPL {
-                o_cnt: owner_subkey_count,
+                o_cnt: 1,
                 members: vec![DHTSchemaSMPLMember {
                     m_key: member_key,
-                    m_cnt: owner_subkey_count,
+                    m_cnt: subkey_count,
                 }],
             }),
             Some(best_crypto_kind()),
@@ -151,7 +150,7 @@ pub(crate) async fn create_service_route_pin(
 
     let dht_key = *rec.key();
 
-    info!("DHT Key: {}", dht_key);
+    info!("Setting DHT Key: {}", dht_key);
     rc.set_dht_value(*rec.key(), 0, route).await?;
     rc.close_dht_record(*rec.key()).await?;
 
@@ -164,7 +163,7 @@ pub(crate) async fn update_service_route_pin(
     dht_key: CryptoTyped<CryptoKey>,
     key_pair: KeyPair,
 ) -> Result<(), Error> {
-    info!("DHT Key: {}", dht_key);
+    info!("Updating DHT Key: {} ", dht_key);
     let rec = rc.open_dht_record(dht_key, Some(key_pair)).await?;
     rc.set_dht_value(*rec.key(), 0, route).await?;
     rc.close_dht_record(*rec.key()).await?;

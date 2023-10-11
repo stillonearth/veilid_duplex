@@ -1,3 +1,5 @@
+#![feature(async_closure)]
+
 use anyhow::Error;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
@@ -7,7 +9,7 @@ use tracing_subscriber::EnvFilter;
 use veilid_core::tools::*;
 use veilid_core::*;
 
-use veilid_duplex::{utils::get_service_route_from_dht, veilid::P2PApp};
+use veilid_duplex::veilid::{AppMessage, P2PApp};
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -20,19 +22,6 @@ struct Args {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct ChatMessage {
     count: u64,
-}
-
-fn on_remote_call(chat_message: ChatMessage) -> ChatMessage {
-    info!("on_remote_call::Received message: {:?}\t", chat_message);
-
-    let mut chat_message = chat_message;
-    chat_message.count += 1;
-
-    chat_message
-}
-
-fn on_halt() {
-    info!("Ther peer seems offline!");
 }
 
 #[tokio::main]
@@ -49,22 +38,42 @@ async fn main() -> Result<(), Error> {
         .with_env_filter(env_filter)
         .init();
 
-    let app: P2PApp = P2PApp::new().await?;
-    let api = app.api.clone();
-    let routing_context = app.routing_context.clone();
+    let mut app = P2PApp::new().await?;
 
     if let Some(service_dht_str) = args.client {
         let service_dht_key = CryptoTyped::<CryptoKey>::from_str(&service_dht_str)?;
-        let (target, _, their_route) =
-            get_service_route_from_dht(api, routing_context, service_dht_key, true).await?;
 
-        info!("their route: {}", their_route);
+        let app_message: AppMessage<ChatMessage> = AppMessage {
+            data: ChatMessage { count: 0 },
+            dht_record: app.our_dht_key,
+        };
 
-        app.send_app_message(ChatMessage { count: 0 }, target)
-            .await?;
+        app.send_message(app_message, service_dht_key).await?;
     }
-
     info!("Starting network loop");
-    app.network_loop(on_remote_call, on_halt).await?;
+    let our_dht_key = app.our_dht_key;
+    let api = app.api.clone();
+    let routing_context = app.routing_context.clone();
+    let routes = app.routes.clone();
+
+    let on_message = async move |message: AppMessage<ChatMessage>| {
+        info!("on_remote_call::Received message: {:?}\t", message.data);
+        let mut message = message.clone();
+
+        message.data.count += 1;
+
+        let remote_dht_record = message.dht_record;
+        message.dht_record = our_dht_key;
+
+        let mut routes = routes.lock().await;
+        let target = routes
+            .get_route(remote_dht_record, api, routing_context.clone())
+            .await
+            .unwrap();
+
+        let _ = message.send(&routing_context, target).await;
+    };
+
+    app.network_loop(on_message).await?;
     Ok(())
 }
