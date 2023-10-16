@@ -12,6 +12,8 @@ use veilid_core::{
     *,
 };
 
+pub const CRYPTO_KIND: CryptoKind = CRYPTO_KIND_VLD0;
+
 pub async fn get_service_route_from_dht(
     api: VeilidAPI,
     routing_context: RoutingContext,
@@ -23,7 +25,7 @@ pub async fn get_service_route_from_dht(
     let dht_desc = routing_context.open_dht_record(service_key, None).await?;
 
     let dht_val = routing_context
-        .get_dht_value(*dht_desc.key(), 0, force_refresh)
+        .get_dht_value(*dht_desc.key(), 1, force_refresh)
         .await?
         .ok_or(io::Error::new(io::ErrorKind::Other, "DHT value not found"))?
         .data()
@@ -36,16 +38,6 @@ pub async fn get_service_route_from_dht(
     let their_route = api.import_remote_private_route(their_route_blob.clone())?;
     info!("Looking up route on DHT, done: {:?}", their_route);
 
-    // info!("Сreating a private route");
-    // let (our_route, _) = api
-    //     .new_custom_private_route(
-    //         &[best_crypto_kind()],
-    //         veilid_core::Stability::Reliable,
-    //         veilid_core::Sequencing::EnsureOrdered,
-    //     )
-    //     .await?;
-    // info!("Сreating a private route, done");
-
     let target = veilid_core::Target::PrivateRoute(their_route);
 
     Ok((target, their_route))
@@ -54,7 +46,7 @@ pub async fn get_service_route_from_dht(
 pub(crate) async fn create_private_route(api: VeilidAPI) -> Result<(CryptoKey, Vec<u8>), Error> {
     let (route_id, blob) = api
         .new_custom_private_route(
-            &[best_crypto_kind()],
+            &[CRYPTO_KIND],
             veilid_core::Stability::Reliable,
             veilid_core::Sequencing::PreferOrdered,
         )
@@ -133,7 +125,7 @@ pub(crate) async fn create_service_route_pin(
     member_key: PublicKey,
     route: Vec<u8>,
 ) -> Result<CryptoTyped<CryptoKey>, Error> {
-    let subkey_count = 1;
+    // let subkey_count = 1;
 
     let rec = rc
         .create_dht_record(
@@ -141,10 +133,10 @@ pub(crate) async fn create_service_route_pin(
                 o_cnt: 1,
                 members: vec![DHTSchemaSMPLMember {
                     m_key: member_key,
-                    m_cnt: subkey_count,
+                    m_cnt: 1,
                 }],
             }),
-            Some(best_crypto_kind()),
+            Some(CRYPTO_KIND),
         )
         .await?;
 
@@ -165,7 +157,7 @@ pub(crate) async fn update_service_route_pin(
 ) -> Result<(), Error> {
     info!("Updating DHT Key: {} ", dht_key);
     let rec = rc.open_dht_record(dht_key, Some(key_pair)).await?;
-    rc.set_dht_value(*rec.key(), 0, route).await?;
+    rc.set_dht_value(*rec.key(), 1, route).await?;
     rc.close_dht_record(*rec.key()).await?;
 
     Ok(())

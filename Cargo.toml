@@ -17,7 +17,7 @@ tempfile = "3.8.0"
 tokio = { version = "1.30.0", features = ["macros", "rt-multi-thread"] }
 tracing = "0.1.37"
 tracing-subscriber = { version = "0.3.17", features = [ "env-filter" ] }
-veilid-core = { git = "https://gitlab.com/veilid/veilid", rev="ff56634667b466ebbd77ee037bc4605ce27e9caa", features = [ "rt-tokio" ] }
+veilid-core = { git = "https://gitlab.com/veilid/veilid", rev="cc5cb8a8b0392d2e17904b1fa3e11f0641b9610e", features = [ "rt-tokio" ] }
 rand="0.8.5"
 
 [dependencies.uuid]

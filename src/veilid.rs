@@ -34,7 +34,7 @@ pub struct AppMessage<T: DeserializeOwned> {
 
 #[derive(Clone)]
 pub struct P2PAppRoutes {
-    routes: HashMap<CryptoKey, Target>,
+    routes: HashMap<CryptoKey, (Target, CryptoKey)>,
 }
 
 impl P2PAppRoutes {
@@ -45,7 +45,7 @@ impl P2PAppRoutes {
         routing_context: RoutingContext,
     ) -> Result<Target, Error> {
         if let Vacant(e) = self.routes.entry(remote_dht_record.value) {
-            let (target, _) = get_service_route_from_dht(
+            let (target, route) = get_service_route_from_dht(
                 api.clone(),
                 routing_context.clone(),
                 remote_dht_record,
@@ -53,16 +53,24 @@ impl P2PAppRoutes {
             )
             .await?;
 
-            e.insert(target);
+            e.insert((target, route));
         }
-        Ok(self.routes.get(&remote_dht_record.value).unwrap().clone())
+        Ok(self.routes.get(&remote_dht_record.value).unwrap().clone().0)
     }
 
     fn remove_route_if_exists(&mut self, dead_route: CryptoKey) {
-        if self.routes.contains_key(&dead_route) {
-            self.routes.remove(&dead_route);
-            info!("DHT value for route {:} removed", dead_route);
+        let key_to_remove: Option<CryptoKey> = self
+            .routes
+            .iter()
+            .filter(|(_, (_, route))| *route == dead_route)
+            .map(|(key, _)| *key)
+            .next();
+
+        if key_to_remove.is_none() {
+            return;
         }
+
+        self.routes.remove(&key_to_remove.unwrap());
     }
 }
 
@@ -125,14 +133,14 @@ impl P2PApp {
             .path()
             .join(Path::new(&id.to_string()))
             .to_path_buf();
-        let key_pair = veilid_core::Crypto::generate_keypair(best_crypto_kind())
+        let key_pair = veilid_core::Crypto::generate_keypair(CRYPTO_KIND)
             .unwrap()
             .value;
 
         let config_callback = Arc::new(move |key| {
             config_callback(
                 veilid_storage_dir.clone(),
-                CryptoTyped::new(best_crypto_kind(), key_pair),
+                CryptoTyped::new(CRYPTO_KIND, key_pair),
                 key,
             )
         });
@@ -157,6 +165,15 @@ impl P2PApp {
             routing_context.clone(),
             key_pair.key,
             our_route_blob.clone(),
+        )
+        .await?;
+
+        // idk if there's a bug in veilid or what, but we need to update the route twice
+        update_service_route_pin(
+            routing_context.clone(),
+            our_route_blob.clone(),
+            our_dht_key,
+            key_pair.clone(),
         )
         .await?;
 
@@ -218,12 +235,10 @@ impl P2PApp {
     {
         let reciever = self.receiver.clone();
         let api = self.api.clone();
-        let routing_context = self.routing_context.clone();
 
         loop {
             let res = reciever.recv()?;
             let api = api.clone();
-            let routing_context = routing_context.clone();
             let routes = self.routes.clone();
             let on_app_message = on_app_message.clone();
 
@@ -244,19 +259,14 @@ impl P2PApp {
                 VeilidUpdate::RouteChange(change) => {
                     info!("VeilidUpdate::RouteChange, {:?}", change);
 
-                    let our_route = self.our_route;
-                    for route in change.dead_routes.iter().filter(|r| **r == our_route) {
-                        let (our_route, our_route_blob) = create_private_route(api.clone()).await?;
-                        self.our_route = our_route;
-                        update_service_route_pin(
-                            routing_context.clone(),
-                            our_route_blob,
-                            self.our_dht_key,
-                            self.key_pair,
-                        )
-                        .await?;
-
-                        info!("DHT value for route {:} changed", route);
+                    let our_route_is_dead = change
+                        .dead_routes
+                        .iter()
+                        .filter(|r| **r == self.our_route)
+                        .count()
+                        > 0;
+                    if our_route_is_dead {
+                        self.update_local_route().await?;
                     }
 
                     let mut routes = routes.lock().await;
@@ -267,5 +277,53 @@ impl P2PApp {
                 _ => (),
             };
         }
+    }
+
+    pub(crate) async fn update_local_route(&mut self) -> Result<(), Error> {
+        let (our_route, our_route_blob) = create_private_route(self.api.clone()).await?;
+        self.our_route = our_route;
+        update_service_route_pin(
+            self.routing_context.clone(),
+            our_route_blob,
+            self.our_dht_key,
+            self.key_pair,
+        )
+        .await?;
+
+        info!("DHT value for route {:} changed", self.our_route);
+
+        Ok(())
+    }
+
+    // let (our_route, our_route_blob) = create_private_route(api.clone()).await?;
+    //     info!("our route: {}", our_route);
+    //     let our_dht_key = create_service_route_pin(
+    //         routing_context.clone(),
+    //         key_pair.key,
+    //         our_route_blob.clone(),
+    //     )
+    //     .await?;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_dht_test_update() -> Result<(), Error> {
+        eprintln!("test_dht_test_update");
+        let mut app = P2PApp::new().await?;
+
+        let mut old_route = app.our_route.clone();
+        for i in 0..3 {
+            eprintln!("Updating DHT record, try n:{}", i);
+            app.update_local_route().await?;
+            let new_route = app.our_route.clone();
+
+            assert!(old_route != new_route);
+            old_route = new_route
+        }
+
+        Ok(())
     }
 }

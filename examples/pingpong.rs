@@ -65,13 +65,16 @@ async fn main() -> Result<(), Error> {
         let remote_dht_record = message.dht_record;
         message.dht_record = our_dht_key;
 
-        let mut routes = routes.lock().await;
-        let target = routes
-            .get_route(remote_dht_record, api, routing_context.clone())
-            .await
-            .unwrap();
+        loop {
+            let mut routes = routes.lock().await;
+            let target = routes
+                .get_route(remote_dht_record, api, routing_context.clone())
+                .await
+                .unwrap();
 
-        let _ = message.send(&routing_context, target).await;
+            let _ = message.send(&routing_context, target).await;
+            break;
+        }
     };
 
     app.network_loop(on_message).await?;
