@@ -68,12 +68,14 @@ async fn main() -> Result<(), Error> {
         loop {
             let mut routes = routes.lock().await;
             let target = routes
-                .get_route(remote_dht_record, api, routing_context.clone())
+                .get_route(remote_dht_record, api.clone(), routing_context.clone())
                 .await
                 .unwrap();
 
-            let _ = message.send(&routing_context, target).await;
-            break;
+            let result = message.send(&routing_context, target).await;
+            if result.is_ok() {
+                return;
+            }
         }
     };
 
