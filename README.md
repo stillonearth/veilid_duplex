@@ -7,6 +7,8 @@ Bob will do the same, and will send his DHT key to alice over Veilid channel.
 When Alice or Bob fail to send a message they will try getting a new route from DHT. They will also update their DHT records when routes break.
 Sometimes a message will be delivered twice, so Alice and Bob keep a record of all hashed of messages they got.
 
+Veilid duplex manages veilid internals, such as allocating routes and recovering from route shutdowns for you.
+
 ## Current Issues
 
 Veilid crushing
@@ -18,6 +20,10 @@ note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 Error: new_custom_private_route
 ```
 
+## Usage
+
+See [pingpong](examples/pingpong.rs) example.
+
 ## Examples
 
 ### Pingpong
@@ -26,12 +32,12 @@ Error: new_custom_private_route
 
 Host: 
 ```bash
-cargo run --example pingpong -- --server
+cargo run --example pingpong -- --server --verbose
 ```
 
 This will print host's DHT key
 
 Client: 
 ```bash
-cargo run --example pingpong -- --client "VLD0:MDoZwLsoQgM6-XKE3giy-8r53e4yCod5Y546laT0El0"
+cargo run --example pingpong --  --verbose --client "VLD0:MDoZwLsoQgM6-XKE3giy-8r53e4yCod5Y546laT0El0"
 ```
