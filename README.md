@@ -2,12 +2,12 @@
 
 Full-duplex asyncronous communication between two peers with [Veilid](https://gitlab.com/veilid/veilid).
 
-Alice publishes her route to DHT and sends DHT key to Bob. Alice will update here route on DHT when connection breaks;
-Bob will do the same, and will send his DHT key to alice over Veilid channel.
-When Alice or Bob fail to send a message they will try getting a new route from DHT. They will also update their DHT records when routes break.
-Sometimes a message will be delivered twice, so Alice and Bob keep a record of all hashed of messages they got.
+- Alice publishes her route to DHT and sends DHT key to Bob. Alice will update here route on DHT when connection breaks;
+- Bob does the same, and sends his DHT key to Alice over Veilid channel.
+- When Alice or Bob fail to send a message they try getting a new route from DHT. They also update their DHT records when their routes die.
+- Sometimes a message will be delivered twice, so Alice and Bob keep a record of all hashed messages they got.
 
-Veilid duplex manages veilid internals, such as allocating routes and recovering from route shutdowns for you.
+Veilid duplex manages veilid internals for you, such as allocating routes and recovering from route shutdowns.
 
 ## Current Issues
 

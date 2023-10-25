@@ -85,6 +85,8 @@ async fn main() -> Result<(), Error> {
             if result.is_ok() {
                 return;
             }
+            info!("Failed to send message, sleeping 1 second");
+            sleep(1000).await;
         }
     };
 
