@@ -55,6 +55,7 @@ impl P2PAppRoutes {
 
             e.insert((target, route));
         }
+
         Ok(self.routes.get(&remote_dht_record.value).unwrap().clone().0)
     }
 
@@ -83,6 +84,10 @@ pub struct P2PApp {
     pub our_dht_key: CryptoTyped<CryptoKey>,
     pub key_pair: KeyPair,
     pub routes: Arc<Mutex<P2PAppRoutes>>,
+    // I've experienced multiple deliveries of the same message when the route is reported brocken
+    // So far the easy fix is to log hashes of al lrecived messages, and drop ones that were already recived
+    // TODO: find a better solution
+    pub recived_message_hashes: Arc<Mutex<Vec<u64>>>,
 }
 
 impl<T: DeserializeOwned + Serialize> AppMessage<T> {
@@ -122,7 +127,6 @@ impl P2PApp {
         // Create VeilidCore setup
         let update_callback = Arc::new(move |change: veilid_core::VeilidUpdate| {
             if let Err(e) = sender.send(change) {
-                // Don't log here, as that loops the update callback in some cases and will deadlock
                 let change = e.into_inner();
                 info!("error sending veilid update callback: {:?}", change);
             }
@@ -181,6 +185,8 @@ impl P2PApp {
             routes: HashMap::new(),
         }));
 
+        let recived_message_hashes = Arc::new(Mutex::new(Vec::<u64>::new()));
+
         Ok(Self {
             api,
             routing_context,
@@ -189,6 +195,7 @@ impl P2PApp {
             our_route,
             routes,
             our_dht_key,
+            recived_message_hashes,
         })
     }
 
@@ -241,19 +248,33 @@ impl P2PApp {
             let api = api.clone();
             let routes = self.routes.clone();
             let on_app_message = on_app_message.clone();
+            let recived_message_hashes = self.recived_message_hashes.clone();
 
             match res {
                 VeilidUpdate::AppCall(call) => {
                     info!("VeilidUpdate::AppMessage");
 
                     spawn(async move {
+                        let raw_message = call.message();
+                        let message_hash = calculate_hash(raw_message);
+
+                        let mut recived_message_hashes = recived_message_hashes.lock().await;
+
+                        let reply = api.app_call_reply(call.id(), b"ACK".to_vec()).await;
+                        if reply.is_err() {
+                            info!("Unable to send ACK");
+                            return;
+                        }
+
+                        if recived_message_hashes.contains(&message_hash) {
+                            return;
+                        }
+
                         let app_message =
-                            serde_json::from_slice::<AppMessage<T>>(call.message()).unwrap();
-                        api.app_call_reply(call.id(), b"ACK".to_vec())
-                            .await
-                            .unwrap();
+                            serde_json::from_slice::<AppMessage<T>>(raw_message).unwrap();
 
                         on_app_message(app_message).await;
+                        recived_message_hashes.push(message_hash);
                     });
                 }
                 VeilidUpdate::RouteChange(change) => {
@@ -294,15 +315,6 @@ impl P2PApp {
 
         Ok(())
     }
-
-    // let (our_route, our_route_blob) = create_private_route(api.clone()).await?;
-    //     info!("our route: {}", our_route);
-    //     let our_dht_key = create_service_route_pin(
-    //         routing_context.clone(),
-    //         key_pair.key,
-    //         our_route_blob.clone(),
-    //     )
-    //     .await?;
 }
 
 #[cfg(test)]

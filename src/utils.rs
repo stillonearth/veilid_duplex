@@ -1,8 +1,10 @@
+use std::hash::Hasher;
 use std::io;
 
 use anyhow::{Context, Error, Ok};
 use base64::engine::general_purpose;
 use base64::Engine;
+use fnv::FnvHasher;
 use tokio::time::{sleep, Duration};
 use tracing::info;
 
@@ -161,4 +163,10 @@ pub(crate) async fn update_service_route_pin(
     rc.close_dht_record(*rec.key()).await?;
 
     Ok(())
+}
+
+pub(crate) fn calculate_hash(data: &[u8]) -> u64 {
+    let mut hasher = FnvHasher::default();
+    hasher.write(data);
+    hasher.finish()
 }

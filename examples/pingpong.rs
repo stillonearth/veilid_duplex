@@ -17,6 +17,8 @@ struct Args {
     server: bool,
     #[arg(long)]
     client: Option<String>,
+    #[arg(long, default_value_t = false)]
+    verbose: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -30,7 +32,11 @@ async fn main() -> Result<(), Error> {
 
     // Logging
     let default_env_filter = EnvFilter::try_from_default_env();
-    let fallback_filter = EnvFilter::new("veilid_core=warn,info");
+    // let fallback_filter = EnvFilter::new("veilid_core=warn,info");
+    let fallback_filter = match args.verbose {
+        true => EnvFilter::new("veilid_core=warn,info"),
+        false => EnvFilter::new("veilid_core=error"),
+    };
     let env_filter = default_env_filter.unwrap_or(fallback_filter);
 
     tracing_subscriber::fmt()
@@ -52,12 +58,15 @@ async fn main() -> Result<(), Error> {
     }
     info!("Starting network loop");
     let our_dht_key = app.our_dht_key;
+
+    println!("Our DHT key: {}", our_dht_key);
+
     let api = app.api.clone();
     let routing_context = app.routing_context.clone();
     let routes = app.routes.clone();
 
     let on_message = async move |message: AppMessage<ChatMessage>| {
-        info!("on_remote_call::Received message: {:?}\t", message.data);
+        println!("on_remote_call\treceived: {:?}\t", message.data);
         let mut message = message.clone();
 
         message.data.count += 1;
@@ -74,6 +83,7 @@ async fn main() -> Result<(), Error> {
 
             let result = message.send(&routing_context, target).await;
             if result.is_ok() {
+                println!("on_remote_call\tsent: {:?}\t", message.data);
                 return;
             }
         }
