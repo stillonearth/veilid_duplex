@@ -91,5 +91,6 @@ async fn main() -> Result<(), Error> {
     };
 
     app.network_loop(on_message).await?;
+    app.api.shutdown().await;
     Ok(())
 }
