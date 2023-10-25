@@ -248,7 +248,7 @@ impl P2PApp {
             let api = api.clone();
             let routes = self.routes.clone();
             let on_app_message = on_app_message.clone();
-            let recived_message_hashes = self.recived_message_hashes.clone();
+            let received_message_hashes = self.recived_message_hashes.clone();
 
             match res {
                 VeilidUpdate::AppCall(call) => {
@@ -258,24 +258,26 @@ impl P2PApp {
                         let raw_message = call.message();
                         let message_hash = calculate_hash(raw_message);
 
-                        let mut recived_message_hashes = recived_message_hashes.lock().await;
-
                         let reply = api.app_call_reply(call.id(), b"ACK".to_vec()).await;
                         if reply.is_err() {
                             info!("Unable to send ACK");
                             return;
                         }
 
-                        if recived_message_hashes.contains(&message_hash) {
-                            println!("Message already recived, skipping");
-                            return;
-                        }
-
                         let app_message =
                             serde_json::from_slice::<AppMessage<T>>(raw_message).unwrap();
 
+                        {
+                            let mut received_message_hashes = received_message_hashes.lock().await;
+                            if received_message_hashes.contains(&message_hash) {
+                                info!("Message already received, skipping");
+                                return;
+                            }
+
+                            received_message_hashes.push(message_hash);
+                        }
+
                         on_app_message(app_message).await;
-                        recived_message_hashes.push(message_hash);
                     });
                 }
                 VeilidUpdate::RouteChange(change) => {
@@ -311,7 +313,6 @@ impl P2PApp {
             self.key_pair,
         )
         .await?;
-
         info!("DHT value for route {:} changed", self.our_route);
 
         Ok(())

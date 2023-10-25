@@ -83,7 +83,6 @@ async fn main() -> Result<(), Error> {
 
             let result = message.send(&routing_context, target).await;
             if result.is_ok() {
-                println!("on_remote_call\tsent: {:?}\t", message.data);
                 return;
             }
         }
