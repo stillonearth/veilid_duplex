@@ -267,6 +267,7 @@ impl P2PApp {
                         }
 
                         if recived_message_hashes.contains(&message_hash) {
+                            println!("Message already recived, skipping");
                             return;
                         }
 
