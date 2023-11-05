@@ -170,3 +170,7 @@ pub(crate) fn calculate_hash(data: &[u8]) -> u64 {
     hasher.write(data);
     hasher.finish()
 }
+
+pub fn crypto_key_from_str(dht_key: String) -> Result<CryptoTyped<CryptoKey>, VeilidAPIError> {
+    CryptoTyped::<CryptoKey>::from_str(&dht_key)
+}

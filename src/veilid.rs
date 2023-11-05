@@ -9,11 +9,7 @@ use anyhow::{Context, Error, Ok};
 use flume::{unbounded, Receiver, Sender};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use tokio::{
-    spawn,
-    sync::Mutex,
-    time::{sleep, Duration},
-};
+use tokio::sync::Mutex;
 use tracing::info;
 use uuid::Uuid;
 
@@ -33,11 +29,11 @@ pub struct AppMessage<T: DeserializeOwned> {
 }
 
 #[derive(Clone)]
-pub struct P2PAppRoutes {
+pub struct VeilidDuplexRoutes {
     routes: HashMap<CryptoKey, (Target, CryptoKey)>,
 }
 
-impl P2PAppRoutes {
+impl VeilidDuplexRoutes {
     pub async fn get_route(
         &mut self,
         remote_dht_record: CryptoTyped<CryptoKey>,
@@ -76,14 +72,14 @@ impl P2PAppRoutes {
 }
 
 #[derive(Clone)]
-pub struct P2PApp {
+pub struct VeilidDuplex {
     pub api: VeilidAPI,
     pub routing_context: RoutingContext,
     pub receiver: Receiver<VeilidUpdate>,
     pub our_route: CryptoKey,
     pub our_dht_key: CryptoTyped<CryptoKey>,
     pub key_pair: KeyPair,
-    pub routes: Arc<Mutex<P2PAppRoutes>>,
+    pub routes: Arc<Mutex<VeilidDuplexRoutes>>,
     // I've experienced multiple deliveries of the same message when the route is reported brocken
     // So far the easy fix is to log hashes of al lrecived messages, and drop ones that were already recived
     // TODO: find a better solution
@@ -116,7 +112,7 @@ impl<T: DeserializeOwned + Serialize> AppMessage<T> {
     }
 }
 
-impl P2PApp {
+impl VeilidDuplex {
     async fn initialize(
     ) -> Result<(VeilidAPI, RoutingContext, Receiver<VeilidUpdate>, KeyPair), Error> {
         let (sender, receiver): (
@@ -181,7 +177,7 @@ impl P2PApp {
         )
         .await?;
 
-        let routes = Arc::new(Mutex::new(P2PAppRoutes {
+        let routes = Arc::new(Mutex::new(VeilidDuplexRoutes {
             routes: HashMap::new(),
         }));
 
@@ -223,7 +219,7 @@ impl P2PApp {
                 break;
             } else if result.is_err() {
                 info!("Unable to send message, sleeping 500ms");
-                sleep(Duration::from_millis(500)).await;
+                sleep(500).await;
                 continue;
             }
 
@@ -278,7 +274,8 @@ impl P2PApp {
                         }
 
                         on_app_message(app_message).await;
-                    });
+                    })
+                    .await;
                 }
                 VeilidUpdate::RouteChange(change) => {
                     info!("VeilidUpdate::RouteChange, {:?}", change);
@@ -303,7 +300,7 @@ impl P2PApp {
         }
     }
 
-    pub(crate) async fn update_local_route(&mut self) -> Result<(), Error> {
+    async fn update_local_route(&mut self) -> Result<(), Error> {
         let (our_route, our_route_blob) = create_private_route(self.api.clone()).await?;
         self.our_route = our_route;
         update_service_route_pin(
@@ -326,7 +323,7 @@ mod tests {
     #[tokio::test]
     async fn test_dht_test_update() -> Result<(), Error> {
         eprintln!("test_dht_test_update");
-        let mut app = P2PApp::new().await?;
+        let mut app = VeilidDuplex::new().await?;
 
         let mut old_route = app.our_route.clone();
         for i in 0..3 {

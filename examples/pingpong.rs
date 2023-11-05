@@ -9,7 +9,7 @@ use tracing_subscriber::EnvFilter;
 use veilid_core::tools::*;
 use veilid_core::*;
 
-use veilid_duplex::veilid::{AppMessage, P2PApp};
+use veilid_duplex::veilid::{AppMessage, VeilidDuplex};
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -44,7 +44,7 @@ async fn main() -> Result<(), Error> {
         .with_env_filter(env_filter)
         .init();
 
-    let mut app = P2PApp::new().await?;
+    let mut app = VeilidDuplex::new().await?;
 
     if let Some(service_dht_str) = args.client {
         let service_dht_key = CryptoTyped::<CryptoKey>::from_str(&service_dht_str)?;
