@@ -5,7 +5,6 @@ use anyhow::{Context, Error, Ok};
 use base64::engine::general_purpose;
 use base64::Engine;
 use fnv::FnvHasher;
-use tokio::time::{sleep, Duration};
 use tracing::info;
 
 use veilid_core::tools::*;
@@ -74,7 +73,7 @@ pub(crate) async fn wait_for_attached(api: &VeilidAPI) -> Result<(), Error> {
             }
             _ => (),
         }
-        sleep(Duration::from_millis(100)).await;
+        sleep(1000).await;
     }
 }
 
@@ -89,7 +88,7 @@ pub(crate) async fn wait_for_network_start(api: &VeilidAPI) -> Result<(), Error>
             );
             return Ok(());
         }
-        sleep(Duration::from_millis(100)).await;
+        sleep(100).await;
     }
 }
 
@@ -100,7 +99,7 @@ pub(crate) async fn wait_for_public_internet_ready(api: &VeilidAPI) -> Result<()
         if state.attachment.public_internet_ready {
             break;
         }
-        sleep(Duration::from_secs(5)).await;
+        sleep(5000).await;
     }
 
     info!("Awaiting 'public_internet_ready', done");

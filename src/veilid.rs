@@ -6,10 +6,10 @@ use std::sync::Arc;
 
 use anyhow::{Context, Error, Ok};
 
+use async_std::sync::Mutex;
 use flume::{unbounded, Receiver, Sender};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
 use tracing::info;
 use uuid::Uuid;
 
@@ -25,6 +25,7 @@ const SEND_ATTEMPTS: u16 = 1024;
 #[serde(bound = "T: Serialize + DeserializeOwned")]
 pub struct AppMessage<T: DeserializeOwned> {
     pub data: T,
+    pub uuid: String,
     pub dht_record: CryptoTyped<CryptoKey>,
 }
 
@@ -83,15 +84,16 @@ pub struct VeilidDuplex {
     // I've experienced multiple deliveries of the same message when the route is reported brocken
     // So far the easy fix is to log hashes of al lrecived messages, and drop ones that were already recived
     // TODO: find a better solution
-    pub recived_message_hashes: Arc<Mutex<Vec<u64>>>,
+    pub received_message_hashes: Arc<Mutex<Vec<u64>>>,
 }
 
 impl<T: DeserializeOwned + Serialize> AppMessage<T> {
     pub async fn send(
-        &self,
+        &mut self,
         routing_context: &RoutingContext,
         target: Target,
     ) -> Result<Vec<u8>, Error> {
+        self.set_uuid();
         let app_message_blob = serde_json::to_vec(self).unwrap();
 
         // Check if blob size > 32kb and fire an error
@@ -109,6 +111,10 @@ impl<T: DeserializeOwned + Serialize> AppMessage<T> {
             .app_call(target.clone(), app_message_blob)
             .await
             .context("app_call")
+    }
+
+    fn set_uuid(&mut self) {
+        self.uuid = format!("{}", Uuid::new_v4());
     }
 }
 
@@ -181,7 +187,7 @@ impl VeilidDuplex {
             routes: HashMap::new(),
         }));
 
-        let recived_message_hashes = Arc::new(Mutex::new(Vec::<u64>::new()));
+        let received_message_hashes = Arc::new(Mutex::new(Vec::<u64>::new()));
 
         Ok(Self {
             api,
@@ -191,13 +197,13 @@ impl VeilidDuplex {
             our_route,
             routes,
             our_dht_key,
-            recived_message_hashes,
+            received_message_hashes,
         })
     }
 
     pub async fn send_message<T: DeserializeOwned>(
         &self,
-        app_message: AppMessage<T>,
+        mut app_message: AppMessage<T>,
         remote_dht_record: CryptoTyped<CryptoKey>,
     ) -> Result<(), Error>
     where
@@ -244,7 +250,7 @@ impl VeilidDuplex {
             let api = api.clone();
             let routes = self.routes.clone();
             let on_app_message = on_app_message.clone();
-            let received_message_hashes = self.recived_message_hashes.clone();
+            let received_message_hashes = self.received_message_hashes.clone();
 
             match res {
                 VeilidUpdate::AppCall(call) => {

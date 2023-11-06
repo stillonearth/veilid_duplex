@@ -9,17 +9,6 @@ Full-duplex asyncronous communication between two peers with [Veilid](https://gi
 
 Veilid duplex manages veilid internals for you, such as allocating routes and recovering from route shutdowns.
 
-## Current Issues
-
-Veilid crushing
-
-```bash
-thread 'tokio-runtime-worker' panicked at /home/cwiz/.cargo/git/checkouts/veilid-88b7e7557f46c329/cc5cb8a/veilid-tools/src/must_join_handle.rs:67:13:
-MustJoinHandle was not completed upon drop. Add cooperative cancellation where appropriate to ensure this is completed before drop.
-note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
-Error: new_custom_private_route
-```
-
 ## Usage
 
 See [pingpong](examples/pingpong.rs) example.

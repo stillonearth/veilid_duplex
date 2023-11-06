@@ -52,6 +52,7 @@ async fn main() -> Result<(), Error> {
         let app_message: AppMessage<ChatMessage> = AppMessage {
             data: ChatMessage { count: 0 },
             dht_record: app.our_dht_key,
+            uuid: "".to_string(),
         };
 
         app.send_message(app_message, service_dht_key).await?;
