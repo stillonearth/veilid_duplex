@@ -1,7 +1,7 @@
 [package]
 edition = "2021"
 name = "veilid_duplex"
-version = "0.1.1"
+version = "0.1.2"
 license = "MIT OR Apache-2.0"
 description = "Full-duplex encrypted communication between 2 nodes"
 keywords = ["veilid", "encryption", "communication", "rl"]
@@ -18,7 +18,7 @@ serde_json = "1.0.107"
 tempfile = "3.8.0"
 tracing = "0.1.37"
 tracing-subscriber = { version = "0.3.17", features = [ "env-filter" ] }
-veilid-core={version="0.2.4", default-features = false, features=["default-async-std"]}
+veilid-core={version="0.2.5", default-features = false, features=["default-async-std"]}
 rand="0.8.5"
 fnv ="1.0.7"
 async-std ="1.12"

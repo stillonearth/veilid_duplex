@@ -154,9 +154,13 @@ impl VeilidDuplex {
         let api = create_api_and_connect(update_callback, config_callback).await?;
 
         // Set up routing with privacy and encryption
+        // let rc = api
+        //     .routing_context()
+        //     .with_privacy()?
+        //     .with_sequencing(Sequencing::PreferOrdered);
+
         let rc = api
-            .routing_context()
-            .with_privacy()?
+            .routing_context()?
             .with_sequencing(Sequencing::PreferOrdered);
 
         Ok((api, rc, receiver, key_pair))
