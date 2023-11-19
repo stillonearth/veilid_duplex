@@ -9,6 +9,10 @@ Full-duplex asyncronous communication between two peers with [Veilid](https://gi
 
 Veilid duplex manages veilid internals for you, such as allocating routes and recovering from route shutdowns.
 
+## Changlelog
+
+- 0.1.3 WASM support
+
 ## Usage
 
 See [pingpong](examples/pingpong.rs) example.
