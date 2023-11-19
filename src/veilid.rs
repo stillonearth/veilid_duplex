@@ -1,7 +1,7 @@
 use std::collections::hash_map::Entry::Vacant;
 use std::future::Future;
 use std::io;
-use std::path::Path;
+
 use std::sync::Arc;
 
 use anyhow::{Context, Error, Ok};
@@ -16,7 +16,6 @@ use uuid::Uuid;
 use veilid_core::tools::*;
 use veilid_core::*;
 
-use crate::config::config_callback;
 use crate::utils::*;
 
 const SEND_ATTEMPTS: u16 = 1024;
@@ -134,30 +133,14 @@ impl VeilidDuplex {
             }
         });
 
-        let id = Uuid::new_v4();
-        let veilid_storage_dir = tempfile::tempdir()?
-            .path()
-            .join(Path::new(&id.to_string()))
-            .to_path_buf();
         let key_pair = veilid_core::Crypto::generate_keypair(CRYPTO_KIND)
             .unwrap()
             .value;
 
-        let config_callback = Arc::new(move |key| {
-            config_callback(
-                veilid_storage_dir.clone(),
-                CryptoTyped::new(CRYPTO_KIND, key_pair),
-                key,
-            )
-        });
-
-        let api = create_api_and_connect(update_callback, config_callback).await?;
-
-        // Set up routing with privacy and encryption
-        // let rc = api
-        //     .routing_context()
-        //     .with_privacy()?
-        //     .with_sequencing(Sequencing::PreferOrdered);
+        #[cfg(target_arch = "wasm32")]
+        let api = create_api_and_connect(update_callback).await?;
+        #[cfg(not(target_arch = "wasm32"))]
+        let api = create_api_and_connect_with_keypair(update_callback, key_pair).await?;
 
         let rc = api
             .routing_context()?

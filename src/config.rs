@@ -3,6 +3,7 @@ use veilid_core::{
     TypedSecretGroup, VeilidAPIError,
 };
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn config_callback(
     veilid_storage_dir: std::path::PathBuf,
     key_pair: CryptoTyped<KeyPair>,

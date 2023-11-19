@@ -11,7 +11,7 @@ Veilid duplex manages veilid internals for you, such as allocating routes and re
 
 ## Changlelog
 
-- 0.1.3 WASM support
+- 0.1.4 WASM support
 
 ## Usage
 
