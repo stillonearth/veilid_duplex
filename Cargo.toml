@@ -1,7 +1,7 @@
 [package]
 edition = "2021"
 name = "veilid_duplex"
-version = "0.1.4"
+version = "0.1.5"
 license = "MIT OR Apache-2.0"
 description = "Full-duplex encrypted communication between 2 nodes"
 keywords = ["veilid", "encryption", "communication", "rl"]
