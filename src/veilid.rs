@@ -229,68 +229,81 @@ impl VeilidDuplex {
         T: Serialize + DeserializeOwned + Send + Sync + Clone + 'static,
         Fut: Future<Output = ()> + Send,
     {
+        loop {
+            self.network_loop_cycle(on_app_message.clone()).await?;
+        }
+    }
+
+    pub async fn network_loop_cycle<F, T, Fut>(&mut self, on_app_message: F) -> Result<(), Error>
+    where
+        F: FnOnce(AppMessage<T>) -> Fut + Send + Clone + 'static,
+        T: Serialize + DeserializeOwned + Send + Sync + Clone + 'static,
+        Fut: Future<Output = ()> + Send,
+    {
         let reciever = self.receiver.clone();
         let api = self.api.clone();
 
-        loop {
-            let res = reciever.recv()?;
-            let api = api.clone();
-            let routes = self.routes.clone();
-            let on_app_message = on_app_message.clone();
-            let received_message_hashes = self.received_message_hashes.clone();
+        if reciever.is_empty() {
+            return Ok(());
+        }
 
-            match res {
-                VeilidUpdate::AppCall(call) => {
-                    info!("VeilidUpdate::AppMessage");
+        let res = reciever.recv()?;
+        let routes = self.routes.clone();
+        let on_app_message = on_app_message.clone();
+        let received_message_hashes = self.received_message_hashes.clone();
 
-                    spawn(async move {
-                        let raw_message = call.message();
-                        let message_hash = calculate_hash(raw_message);
+        match res {
+            VeilidUpdate::AppCall(call) => {
+                info!("VeilidUpdate::AppMessage");
 
-                        let reply = api.app_call_reply(call.id(), b"ACK".to_vec()).await;
-                        if reply.is_err() {
-                            info!("Unable to send ACK");
+                spawn(async move {
+                    let raw_message = call.message();
+                    let message_hash = calculate_hash(raw_message);
+
+                    let reply = api.app_call_reply(call.id(), b"ACK".to_vec()).await;
+                    if reply.is_err() {
+                        info!("Unable to send ACK");
+                        return;
+                    }
+
+                    let app_message = serde_json::from_slice::<AppMessage<T>>(raw_message).unwrap();
+
+                    {
+                        let mut received_message_hashes = received_message_hashes.lock().await;
+                        if received_message_hashes.contains(&message_hash) {
+                            info!("Message already received, skipping");
                             return;
                         }
 
-                        let app_message =
-                            serde_json::from_slice::<AppMessage<T>>(raw_message).unwrap();
-
-                        {
-                            let mut received_message_hashes = received_message_hashes.lock().await;
-                            if received_message_hashes.contains(&message_hash) {
-                                info!("Message already received, skipping");
-                                return;
-                            }
-
-                            received_message_hashes.push(message_hash);
-                        }
-
-                        on_app_message(app_message).await;
-                    })
-                    .await;
-                }
-                VeilidUpdate::RouteChange(change) => {
-                    info!("VeilidUpdate::RouteChange, {:?}", change);
-
-                    let our_route_is_dead = change
-                        .dead_routes
-                        .iter()
-                        .filter(|r| **r == self.our_route)
-                        .count()
-                        > 0;
-                    if our_route_is_dead {
-                        self.update_local_route().await?;
+                        received_message_hashes.push(message_hash);
                     }
 
-                    let mut routes = routes.lock().await;
-                    for dead_route in change.dead_remote_routes {
-                        routes.remove_route_if_exists(dead_route);
-                    }
+                    on_app_message(app_message).await;
+                })
+                .await;
+            }
+            VeilidUpdate::RouteChange(change) => {
+                info!("VeilidUpdate::RouteChange, {:?}", change);
+
+                let our_route_is_dead = change
+                    .dead_routes
+                    .iter()
+                    .filter(|r| **r == self.our_route)
+                    .count()
+                    > 0;
+                if our_route_is_dead {
+                    self.update_local_route().await?;
                 }
-                _ => (),
-            };
-        }
+
+                let mut routes = routes.lock().await;
+                for dead_route in change.dead_remote_routes {
+                    routes.remove_route_if_exists(dead_route);
+                }
+            }
+            _ => (),
+        };
+
+        Ok(())
     }
 
     async fn update_local_route(&mut self) -> Result<(), Error> {
