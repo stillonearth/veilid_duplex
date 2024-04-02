@@ -303,23 +303,22 @@ pub(crate) async fn create_service_route_pin(
 ) -> Result<CryptoTyped<CryptoKey>, Error> {
     // let subkey_count = 1;
 
+    let schema = DHTSchemaSMPL::new(
+        1,
+        vec![DHTSchemaSMPLMember {
+            m_key: member_key,
+            m_cnt: 1,
+        }],
+    )?;
+
     let rec = rc
-        .create_dht_record(
-            DHTSchema::SMPL(DHTSchemaSMPL {
-                o_cnt: 1,
-                members: vec![DHTSchemaSMPLMember {
-                    m_key: member_key,
-                    m_cnt: 1,
-                }],
-            }),
-            Some(CRYPTO_KIND),
-        )
+        .create_dht_record(DHTSchema::SMPL(schema), Some(CRYPTO_KIND))
         .await?;
 
     let dht_key = *rec.key();
 
     info!("Setting DHT Key: {}", dht_key);
-    rc.set_dht_value(*rec.key(), 0, route).await?;
+    rc.set_dht_value(*rec.key(), 0, route, None).await?;
     rc.close_dht_record(*rec.key()).await?;
 
     Ok(dht_key)
@@ -333,7 +332,8 @@ pub(crate) async fn update_service_route_pin(
 ) -> Result<(), Error> {
     info!("Updating DHT Key: {} ", dht_key);
     let rec = rc.open_dht_record(dht_key, Some(key_pair)).await?;
-    rc.set_dht_value(*rec.key(), 1, route).await?;
+    rc.set_dht_value(*rec.key(), 1, route, Some(key_pair))
+        .await?;
     rc.close_dht_record(*rec.key()).await?;
 
     Ok(())

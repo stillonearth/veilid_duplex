@@ -4,7 +4,6 @@ use anyhow::Error;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 use tracing::info;
-use tracing_subscriber::EnvFilter;
 
 use veilid_core::tools::*;
 use veilid_core::*;
@@ -29,20 +28,6 @@ struct ChatMessage {
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     let args = Args::parse();
-
-    // Logging
-    let default_env_filter = EnvFilter::try_from_default_env();
-    // let fallback_filter = EnvFilter::new("veilid_core=warn,info");
-    let fallback_filter = match args.verbose {
-        true => EnvFilter::new("veilid_core=warn,info"),
-        false => EnvFilter::new("veilid_core=error"),
-    };
-    let env_filter = default_env_filter.unwrap_or(fallback_filter);
-
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(env_filter)
-        .init();
 
     let mut app = VeilidDuplex::new().await?;
 

@@ -1,7 +1,7 @@
 [package]
 edition = "2021"
 name = "veilid_duplex"
-version = "0.1.6"
+version = "0.2.0"
 license = "MIT OR Apache-2.0"
 description = "Full-duplex encrypted communication between 2 nodes"
 keywords = ["veilid", "encryption", "communication", "rl"]
@@ -9,7 +9,7 @@ repository = "https://gitlab.com/cwiz/veilid_duplex"
 
 [dependencies]
 anyhow = "1.0.72"
-base64 = "0.21.3"
+base64 = "0.22.0"
 clap = { version = "4.3.21", features = ["derive"] }
 flume = "0.11.0"
 futures-util = "0.3.28"
@@ -23,22 +23,22 @@ fnv ="1.0.7"
 async-std ="1.12"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-veilid-core = {version="0.2.5", default-features = false, features=["default-async-std"]}
+veilid-core = {version="0.3.0", default-features = false, features=["default-async-std"]}
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-veilid-core = {version="0.2.5", default-features = false, features=["default-wasm"]}
+veilid-core = {version="0.3.0", default-features = false, features=["default-wasm"]}
 veilid-wasm = {version = "0.1.0"}
 
 [dependencies.uuid]
 version = "1.4.1"
 features = [
-    "v4",               
-    "fast-rng",          
-    "macro-diagnostics", 
+    "v4",
+    "fast-rng",
+    "macro-diagnostics",
 ]
 
 [dev-dependencies]
 tokio = { version = "1.32.0", features = ["full"] }
 
-[profile.test] 
+[profile.test]
 opt-level = 2
