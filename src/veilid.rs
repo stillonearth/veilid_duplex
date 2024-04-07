@@ -152,10 +152,8 @@ impl VeilidDuplex {
     pub async fn new() -> Result<Self, Error> {
         let (api, routing_context, receiver, node_keypair) = Self::initialize().await?;
 
-        println!("Starting node");
         let (our_route, our_route_blob) = create_private_route(api.clone()).await?;
         info!("our route: {}", our_route);
-        println!("Creating dht record");
         let (our_dht_key, dht_keypair) =
             create_service_route_pin(routing_context.clone(), our_route_blob.clone()).await?;
 

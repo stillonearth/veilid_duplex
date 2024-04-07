@@ -35,7 +35,7 @@ pub async fn get_service_route_from_dht(
     let dht_desc = routing_context.open_dht_record(service_key, None).await?;
 
     let dht_val = routing_context
-        .get_dht_value(*dht_desc.key(), 1, force_refresh)
+        .get_dht_value(*dht_desc.key(), 0, force_refresh)
         .await?
         .ok_or(io::Error::new(io::ErrorKind::Other, "DHT value not found"))?
         .data()
@@ -325,12 +325,7 @@ pub(crate) async fn update_service_route_pin(
     info!("Updating DHT Key: {} ", dht_key);
     let rec = rc.open_dht_record(dht_key, Some(dht_owner_keypair)).await?;
 
-    println!("!!!!");
-
     rc.set_dht_value(*rec.key(), 0, route, None).await?;
-
-    println!("done!");
-
     rc.close_dht_record(*rec.key()).await?;
 
     Ok(())
