@@ -156,6 +156,10 @@ pub fn config_callback(
         "network.protocol.wss.listen_address" => Ok(Box::new("".to_owned())),
         "network.protocol.wss.path" => Ok(Box::new(String::from("ws"))),
         "network.protocol.wss.url" => Ok(Box::new(Option::<String>::None)),
+        "network.client_allowlist_timeout_ms" => Ok(Box::new(300_000u32)),
+        "network.dht.public_watch_limit" => Ok(Box::new(32u32)),
+        "network.dht.member_watch_limit" => Ok(Box::new(8u32)),
+        "network.dht.max_watch_expiration_ms" => Ok(Box::new(600_000u32)),
         _ => {
             let err = format!("config key '{}' doesn't exist", key);
             // debug!("{}", err);

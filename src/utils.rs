@@ -298,42 +298,39 @@ pub(crate) async fn create_api_and_connect(
 
 pub(crate) async fn create_service_route_pin(
     rc: RoutingContext,
-    member_key: PublicKey,
     route: Vec<u8>,
-) -> Result<CryptoTyped<CryptoKey>, Error> {
-    // let subkey_count = 1;
+) -> Result<(CryptoTyped<CryptoKey>, KeyPair), Error> {
+    let schema = DHTSchema::dflt(1)?;
 
-    let schema = DHTSchemaSMPL::new(
-        1,
-        vec![DHTSchemaSMPLMember {
-            m_key: member_key,
-            m_cnt: 1,
-        }],
-    )?;
-
-    let rec = rc
-        .create_dht_record(DHTSchema::SMPL(schema), Some(CRYPTO_KIND))
-        .await?;
+    let rec = rc.create_dht_record(schema, Some(CRYPTO_KIND)).await?;
 
     let dht_key = *rec.key();
+    let owner = rec.owner();
+    let secret = rec.owner_secret().unwrap();
+    let keypair = KeyPair::new(*owner, *secret);
 
     info!("Setting DHT Key: {}", dht_key);
     rc.set_dht_value(*rec.key(), 0, route, None).await?;
     rc.close_dht_record(*rec.key()).await?;
 
-    Ok(dht_key)
+    Ok((dht_key, keypair))
 }
 
 pub(crate) async fn update_service_route_pin(
     rc: RoutingContext,
     route: Vec<u8>,
     dht_key: CryptoTyped<CryptoKey>,
-    key_pair: KeyPair,
+    dht_owner_keypair: KeyPair,
 ) -> Result<(), Error> {
     info!("Updating DHT Key: {} ", dht_key);
-    let rec = rc.open_dht_record(dht_key, Some(key_pair)).await?;
-    rc.set_dht_value(*rec.key(), 1, route, Some(key_pair))
-        .await?;
+    let rec = rc.open_dht_record(dht_key, Some(dht_owner_keypair)).await?;
+
+    println!("!!!!");
+
+    rc.set_dht_value(*rec.key(), 0, route, None).await?;
+
+    println!("done!");
+
     rc.close_dht_record(*rec.key()).await?;
 
     Ok(())

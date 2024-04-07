@@ -52,7 +52,7 @@ impl VeilidDuplexRoutes {
             e.insert((target, route));
         }
 
-        Ok(self.routes.get(&remote_dht_record.value).unwrap().clone().0)
+        Ok(self.routes.get(&remote_dht_record.value).unwrap().0)
     }
 
     fn remove_route_if_exists(&mut self, dead_route: CryptoKey) {
@@ -78,11 +78,11 @@ pub struct VeilidDuplex {
     pub receiver: Receiver<VeilidUpdate>,
     pub our_route: CryptoKey,
     pub our_dht_key: CryptoTyped<CryptoKey>,
-    pub key_pair: KeyPair,
+    pub node_keypair: KeyPair,
+    pub dht_keypair: KeyPair,
     pub routes: Arc<Mutex<VeilidDuplexRoutes>>,
-    // I've experienced multiple deliveries of the same message when the route is reported brocken
-    // So far the easy fix is to log hashes of al lrecived messages, and drop ones that were already recived
-    // TODO: find a better solution
+    // There can be multiple deliveries of the same message when the route is reported broken
+    // So far the easy fix is to log hashes of all received messages, and drop ones that were already received
     pub received_message_hashes: Arc<Mutex<Vec<u64>>>,
 }
 
@@ -107,7 +107,7 @@ impl<T: DeserializeOwned + Serialize> AppMessage<T> {
         );
 
         routing_context
-            .app_call(target.clone(), app_message_blob)
+            .app_call(target, app_message_blob)
             .await
             .context("app_call")
     }
@@ -133,42 +133,41 @@ impl VeilidDuplex {
             }
         });
 
-        let key_pair = veilid_core::Crypto::generate_keypair(CRYPTO_KIND)
+        let node_keypair = veilid_core::Crypto::generate_keypair(CRYPTO_KIND)
             .unwrap()
             .value;
 
         #[cfg(target_arch = "wasm32")]
         let api = create_api_and_connect(update_callback).await?;
         #[cfg(not(target_arch = "wasm32"))]
-        let api = create_api_and_connect_with_keypair(update_callback, key_pair).await?;
+        let api = create_api_and_connect_with_keypair(update_callback, node_keypair).await?;
 
         let rc = api
             .routing_context()?
             .with_sequencing(Sequencing::PreferOrdered);
 
-        Ok((api, rc, receiver, key_pair))
+        Ok((api, rc, receiver, node_keypair))
     }
 
     pub async fn new() -> Result<Self, Error> {
-        let (api, routing_context, receiver, key_pair) = Self::initialize().await?;
+        let (api, routing_context, receiver, node_keypair) = Self::initialize().await?;
 
+        println!("Starting node");
         let (our_route, our_route_blob) = create_private_route(api.clone()).await?;
         info!("our route: {}", our_route);
-        let our_dht_key = create_service_route_pin(
-            routing_context.clone(),
-            key_pair.key,
-            our_route_blob.clone(),
-        )
-        .await?;
+        println!("Creating dht record");
+        let (our_dht_key, dht_keypair) =
+            create_service_route_pin(routing_context.clone(), our_route_blob.clone()).await?;
 
-        // idk if there's a bug in veilid or what, but we need to update the route twice
-        update_service_route_pin(
-            routing_context.clone(),
-            our_route_blob.clone(),
-            our_dht_key,
-            key_pair.clone(),
-        )
-        .await?;
+        // println!("Updating dht record");
+        // // idk if there's a bug in veilid or what, but we need to update the route twice
+        // update_service_route_pin(
+        //     routing_context.clone(),
+        //     our_route_blob.clone(),
+        //     our_dht_key,
+        //     dht_keypair.clone(),
+        // )
+        // .await?;
 
         let routes = Arc::new(Mutex::new(VeilidDuplexRoutes {
             routes: HashMap::new(),
@@ -180,7 +179,8 @@ impl VeilidDuplex {
             api,
             routing_context,
             receiver,
-            key_pair,
+            node_keypair,
+            dht_keypair,
             our_route,
             routes,
             our_dht_key,
@@ -313,7 +313,7 @@ impl VeilidDuplex {
             self.routing_context.clone(),
             our_route_blob,
             self.our_dht_key,
-            self.key_pair,
+            self.dht_keypair,
         )
         .await?;
         info!("DHT value for route {:} changed", self.our_route);
@@ -331,11 +331,11 @@ mod tests {
         eprintln!("test_dht_test_update");
         let mut app = VeilidDuplex::new().await?;
 
-        let mut old_route = app.our_route.clone();
+        let mut old_route = app.our_route;
         for i in 0..3 {
             eprintln!("Updating DHT record, try n:{}", i);
             app.update_local_route().await?;
-            let new_route = app.our_route.clone();
+            let new_route = app.our_route;
 
             assert!(old_route != new_route);
             old_route = new_route

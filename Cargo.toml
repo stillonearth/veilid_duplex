@@ -23,10 +23,10 @@ fnv ="1.0.7"
 async-std ="1.12"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-veilid-core = {version="0.3.0", default-features = false, features=["default-async-std"]}
+veilid-core = {version="0.3", default-features = false, features=["default-async-std"]}
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-veilid-core = {version="0.3.0", default-features = false, features=["default-wasm"]}
+veilid-core = {version="0.3", default-features = false, features=["default-wasm"]}
 veilid-wasm = {version = "0.1.0"}
 
 [dependencies.uuid]
