@@ -32,7 +32,7 @@ pub trait AppLogic<T: DeserializeOwned> {
     fn on_message(
         &mut self,
         message: AppMessage<T>,
-    ) -> impl std::future::Future<Output = ()> + Send;
+    ) -> impl std::future::Future<Output = ()> + Send + Sized;
 }
 
 #[derive(Clone)]
@@ -164,16 +164,6 @@ impl VeilidDuplex {
         let (our_dht_key, dht_keypair) =
             create_service_route_pin(routing_context.clone(), our_route_blob.clone()).await?;
 
-        // println!("Updating dht record");
-        // // idk if there's a bug in veilid or what, but we need to update the route twice
-        // update_service_route_pin(
-        //     routing_context.clone(),
-        //     our_route_blob.clone(),
-        //     our_dht_key,
-        //     dht_keypair.clone(),
-        // )
-        // .await?;
-
         let routes = Arc::new(Mutex::new(VeilidDuplexRoutes {
             routes: HashMap::new(),
         }));
@@ -228,21 +218,22 @@ impl VeilidDuplex {
         Ok(())
     }
 
-    pub async fn network_loop<F, T, Fut>(&mut self, on_app_message: F) -> Result<(), Error>
+    pub async fn network_loop<T, U, Fut>(&mut self, app_logic: U) -> Result<(), Error>
     where
-        F: FnOnce(AppMessage<T>) -> Fut + Send + Clone + 'static,
-        T: Serialize + DeserializeOwned + Send + Sync + Clone + 'static,
+        T: Serialize + DeserializeOwned + Send + Sync + Clone + Sized + 'static,
+        U: AppLogic<T> + Clone + Send + 'static,
         Fut: Future<Output = ()> + Send,
     {
         loop {
-            self.network_loop_cycle(on_app_message.clone()).await?;
+            self.network_loop_cycle::<T, U, Fut>(app_logic.clone())
+                .await?;
         }
     }
 
-    pub async fn network_loop_cycle<F, T, Fut>(&mut self, on_app_message: F) -> Result<(), Error>
+    pub async fn network_loop_cycle<T, U, Fut>(&mut self, app_logic: U) -> Result<(), Error>
     where
-        F: FnOnce(AppMessage<T>) -> Fut + Send + Clone + 'static,
         T: Serialize + DeserializeOwned + Send + Sync + Clone + 'static,
+        U: AppLogic<T> + Clone + Send + 'static,
         Fut: Future<Output = ()> + Send,
     {
         let reciever = self.receiver.clone();
@@ -254,8 +245,8 @@ impl VeilidDuplex {
 
         let res = reciever.recv()?;
         let routes = self.routes.clone();
-        let on_app_message = on_app_message.clone();
         let received_message_hashes = self.received_message_hashes.clone();
+        let mut app_logic = app_logic.clone();
 
         match res {
             VeilidUpdate::AppCall(call) => {
@@ -283,7 +274,7 @@ impl VeilidDuplex {
                         received_message_hashes.push(message_hash);
                     }
 
-                    on_app_message(app_message).await;
+                    app_logic.on_message(app_message).await;
                 })
                 .await;
             }
