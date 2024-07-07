@@ -28,6 +28,13 @@ pub struct AppMessage<T: DeserializeOwned> {
     pub dht_record: CryptoTyped<CryptoKey>,
 }
 
+pub trait AppLogic<T: DeserializeOwned> {
+    fn on_message(
+        &mut self,
+        message: AppMessage<T>,
+    ) -> impl std::future::Future<Output = ()> + Send;
+}
+
 #[derive(Clone)]
 pub struct VeilidDuplexRoutes {
     routes: HashMap<CryptoKey, (Target, CryptoKey)>,

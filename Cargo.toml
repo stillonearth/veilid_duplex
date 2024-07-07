@@ -1,11 +1,12 @@
 [package]
 edition = "2021"
 name = "veilid_duplex"
-version = "0.2.0"
+version = "0.2.1"
 license = "MIT OR Apache-2.0"
 description = "Full-duplex encrypted communication between 2 nodes"
 keywords = ["veilid", "encryption", "communication", "rl"]
 repository = "https://gitlab.com/cwiz/veilid_duplex"
+rust-version = "1.81.0"
 
 [dependencies]
 anyhow = "1.0.72"
