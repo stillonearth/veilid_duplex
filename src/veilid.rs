@@ -1,5 +1,4 @@
 use std::collections::hash_map::Entry::Vacant;
-use std::future::Future;
 use std::io;
 
 use std::sync::Arc;
@@ -218,23 +217,20 @@ impl VeilidDuplex {
         Ok(())
     }
 
-    pub async fn network_loop<T, U, Fut>(&mut self, app_logic: U) -> Result<(), Error>
+    pub async fn network_loop<T, U>(&mut self, app_logic: U) -> Result<(), Error>
     where
         T: Serialize + DeserializeOwned + Send + Sync + Clone + Sized + 'static,
         U: AppLogic<T> + Clone + Send + 'static,
-        Fut: Future<Output = ()> + Send,
     {
         loop {
-            self.network_loop_cycle::<T, U, Fut>(app_logic.clone())
-                .await?;
+            self.network_loop_cycle::<T, U>(app_logic.clone()).await?;
         }
     }
 
-    pub async fn network_loop_cycle<T, U, Fut>(&mut self, app_logic: U) -> Result<(), Error>
+    pub async fn network_loop_cycle<T, U>(&mut self, app_logic: U) -> Result<(), Error>
     where
         T: Serialize + DeserializeOwned + Send + Sync + Clone + 'static,
         U: AppLogic<T> + Clone + Send + 'static,
-        Fut: Future<Output = ()> + Send,
     {
         let reciever = self.receiver.clone();
         let api = self.api.clone();

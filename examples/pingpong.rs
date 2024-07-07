@@ -27,6 +27,7 @@ struct ChatMessage {
     count: u64,
 }
 
+#[derive(Clone)]
 struct ChatAppLogic {
     api: VeilidAPI,
     our_dht_key: CryptoTyped<CryptoKey>,
@@ -100,12 +101,12 @@ async fn main() -> Result<(), Error> {
             uuid: "".to_string(),
         };
 
-        // app.send_message(app_message, service_dht_key).await?;
+        app.send_message(app_message, service_dht_key).await?;
     }
 
     let app_logic = ChatAppLogic::new(app.clone());
 
-    // app.network_loop(on_message).await?;
+    app.network_loop(app_logic).await?;
     app.api.shutdown().await;
     Ok(())
 }
